@@ -4,7 +4,7 @@ const SUBCATEGORIES = ["No Bug Jump", "Bug Jump", "Better Than Glitchless", "Gli
 const headers = { "Access-Control-Allow-Origin": "https://trsr.app", "Access-Control-Allow-Credentials": "true", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type", "Content-Type": "application/json" };
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers });
 const randomItem = (items) => items[Math.floor(Math.random() * items.length)];
-const queueKey = (type, category, subcategory) => type === "random" ? "random" : `ruleset:${category}:${subcategory}`;
+const queueKey = (type, level, category, subcategory) => type === "random" ? "random" : `ruleset:${level}:${category}:${subcategory}`;
 
 async function body(request) {
   try { return await request.json(); } catch { return null; }
@@ -223,13 +223,14 @@ export default {
     if (request.method === "POST" && url.pathname === "/queue") {
       const data = await body(request);
       const playerId = typeof data?.playerId === "string" ? data.playerId.trim() : "";
-      const { queueType, category, subcategory } = data ?? {};
+      const { queueType, level, category, subcategory } = data ?? {};
       if (!playerId) return json({ error: "A player ID is required." }, 400);
       const session = await sessionFor(env, data?.sessionToken);
       if (!session) return json({ error: "Link your Speedrun.com account before matchmaking." }, 401);
       if (queueType !== "random" && queueType !== "ruleset") return json({ error: "Invalid queue type." }, 400);
       if (queueType === "ruleset" && (!CATEGORIES.includes(category) || !SUBCATEGORIES.includes(subcategory))) return json({ error: "Choose a valid category and subcategory." }, 400);
-      const key = queueKey(queueType, category, subcategory);
+      if (queueType === "ruleset" && !LEVELS.includes(level)) return json({ error: "Choose a valid level." }, 400);
+      const key = queueKey(queueType, level, category, subcategory);
       await env.DB.prepare(`DELETE FROM queue_entries WHERE player_id = ?`).bind(playerId).run();
       const waiting = await env.DB.prepare(`SELECT * FROM queue_entries WHERE queue_key = ?`).bind(key).first();
       if (!waiting) {
@@ -239,7 +240,7 @@ export default {
       }
       if (waiting.player_id === playerId) return json({ status: "waiting", message: "You are already waiting in this queue." });
       const createdAtUtc = new Date().toISOString();
-      const match = { id: crypto.randomUUID(), players: [{ playerId: waiting.player_id, speedrunUserId: waiting.speedrun_user_id }, { playerId, speedrunUserId: session.speedrun_user_id }], level: randomItem(LEVELS), category: queueType === "random" ? randomItem(CATEGORIES) : category, subcategory: queueType === "random" ? randomItem(SUBCATEGORIES) : subcategory, difficulty: "Easy", createdAtUtc };
+      const match = { id: crypto.randomUUID(), players: [{ playerId: waiting.player_id, speedrunUserId: waiting.speedrun_user_id }, { playerId, speedrunUserId: session.speedrun_user_id }], level: queueType === "random" ? randomItem(LEVELS) : level, category: queueType === "random" ? randomItem(CATEGORIES) : category, subcategory: queueType === "random" ? randomItem(SUBCATEGORIES) : subcategory, difficulty: "Easy", createdAtUtc };
       const matchJson = JSON.stringify(match);
       await env.DB.batch([
         env.DB.prepare(`DELETE FROM queue_entries WHERE queue_key = ?`).bind(key),
@@ -504,7 +505,14 @@ export default {
     if (request.method === "GET" && url.pathname.startsWith("/matches/")) {
       const playerId = decodeURIComponent(url.pathname.slice("/matches/".length));
       const result = await env.DB.prepare(`SELECT match_json FROM matches WHERE player_id = ?`).bind(playerId).first();
-      return result ? json({ status: "matched", match: JSON.parse(result.match_json) }) : json({ status: "none" });
+      if (!result) return json({ status: "none" });
+      const match = JSON.parse(result.match_json);
+      const outcome = await env.DB.prepare(
+        `SELECT winner_player_id, decided_at_utc FROM match_outcomes WHERE match_id = ?`
+      ).bind(match.id).first();
+      return outcome
+        ? json({ status: "completed", match, winnerPlayerId: outcome.winner_player_id, decidedAtUtc: outcome.decided_at_utc })
+        : json({ status: "matched", match });
     }
     return json({ error: "Not found." }, 404);
   }
