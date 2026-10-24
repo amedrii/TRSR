@@ -1,0 +1,45 @@
+name: Deploy TRSR website
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Validate website and backend
+        shell: bash
+        run: |
+          node --check web/app.js
+          for path in /public/overview /public/players '/public/leaderboards?game=anniversary'; do
+            curl --fail --silent --show-error --max-time 15 \
+              --header 'Origin: https://trsr.app' \
+              --output /dev/null "https://api.trsr.app${path}"
+          done
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload website
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: web
+
+      - name: Deploy website
+        id: deployment
+        uses: actions/deploy-pages@v4
