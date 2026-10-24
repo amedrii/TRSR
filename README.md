@@ -1,4 +1,4 @@
-# TRSR — Tomb Raider Speedrun Races
+# TRSR — Tomb Raider Speedrunning
 
 TRSR contains the website, matchmaking backend, and Tomb Raider race clients. TRASR is the Tomb Raider: Anniversary desktop client.
 
