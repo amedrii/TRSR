@@ -21,3 +21,10 @@ compile_commands.json
 .qtcreator/
 server/node_modules/
 server/.env
+pdb/
+# Local release packages and research files
+TRASR-*-Windows/
+TRASR-*-Windows.zip
+reference/
+__pycache__/
+*.pyc

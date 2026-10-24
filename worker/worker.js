@@ -1,7 +1,7 @@
-const LEVELS = ["Mountain Caves", "City of Vilcabamba", "The Lost Valley", "Tomb of Qualopec", "St. Francis Folly", "The Coliseum", "Midas Palace", "Tomb of Tihocan", "Temple of Khamoon", "Obelisk of Khamoon", "Sanctuary of the Scion", "Natla's Mines", "The Great Pyramid", "Final Conflict"];
+const LEVELS = ["Mountain Caves", "City of Vilcabamba", "The Lost Valley", "Tomb of Qualopec", "St. Francis Folly", "The Coliseum", "Midas Palace", "Tomb of Tihocan", "Temple of Khamoon", "Obelisk of Khamoon", "Sanctuary of the Scion", "Natla's Mines", "The Great Pyramid", "Final Conflict", "Croft Manor"];
 const CATEGORIES = ["Any%", "100%"];
 const SUBCATEGORIES = ["No Bug Jump", "Bug Jump", "Better Than Glitchless", "Glitchless"];
-const headers = { "Access-Control-Allow-Origin": "https://trsr.app", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type", "Content-Type": "application/json" };
+const headers = { "Access-Control-Allow-Origin": "https://trsr.app", "Access-Control-Allow-Credentials": "true", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type", "Content-Type": "application/json" };
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers });
 const randomItem = (items) => items[Math.floor(Math.random() * items.length)];
 const queueKey = (type, category, subcategory) => type === "random" ? "random" : `ruleset:${category}:${subcategory}`;
@@ -21,13 +21,158 @@ async function sessionFor(env, token) {
     .bind(await hash(token), new Date().toISOString()).first();
 }
 
+function formatIgt(milliseconds) {
+  const totalSeconds = Math.floor(milliseconds / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const centiseconds = Math.floor((milliseconds % 1000) / 10);
+  return (hours ? String(hours).padStart(2, "0") + ":" : "")
+    + String(minutes).padStart(2, "0") + ":"
+    + String(seconds).padStart(2, "0") + "."
+    + String(centiseconds).padStart(2, "0");
+}
+
+function browserToken(request) {
+  const cookie = request.headers.get("Cookie") || "";
+  const match = cookie.match(/(?:^|;\s*)trsr_session=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers });
     if (request.method === "GET" && url.pathname === "/health") return json({ status: "ok", service: "TRSR matchmaking server" });
 
+    if (request.method === "GET" && url.pathname === "/public/overview") {
+      const cutoff = new Date(Date.now() - 90000).toISOString();
+      const counts = await env.DB.batch([
+        env.DB.prepare("SELECT COUNT(*) AS total FROM queue_entries"),
+        env.DB.prepare("SELECT COUNT(DISTINCT player_id) AS total FROM match_presence WHERE updated_at_utc >= ? AND state IN ('ready', 'arming', 'armed', 'running', 'restarted')").bind(cutoff)
+      ]);
+      const queue = Number(counts[0].results?.[0]?.total ?? 0);
+      const racing = Number(counts[1].results?.[0]?.total ?? 0);
+      return json({ online: queue + racing, queue, racing });
+    }
+
+    if (request.method === "GET" && url.pathname === "/public/players") {
+      const cutoff = new Date(Date.now() - 90000).toISOString();
+      const [queued, active] = await env.DB.batch([
+        env.DB.prepare("SELECT q.speedrun_user_id, p.display_name FROM queue_entries q LEFT JOIN profiles p ON p.speedrun_user_id = q.speedrun_user_id ORDER BY q.joined_at DESC LIMIT 20"),
+        env.DB.prepare("SELECT mp.player_id, mp.state, m.match_json FROM match_presence mp JOIN matches m ON m.player_id = mp.player_id WHERE mp.updated_at_utc >= ? AND mp.state IN ('ready', 'arming', 'armed', 'running', 'restarted') ORDER BY mp.updated_at_utc DESC LIMIT 20").bind(cutoff)
+      ]);
+      const players = new Map();
+      for (const row of queued.results ?? []) {
+        players.set(row.speedrun_user_id, {
+          id: row.speedrun_user_id,
+          name: row.display_name || row.speedrun_user_id,
+          state: "in queue",
+          game: "Tomb Raider: Anniversary"
+        });
+      }
+      const activePlayers = [];
+      for (const row of active.results ?? []) {
+        let match;
+        try { match = JSON.parse(row.match_json); } catch { continue; }
+        const participant = match.players?.find((player) => player.playerId === row.player_id);
+        if (participant?.speedrunUserId) activePlayers.push({ id: participant.speedrunUserId, state: row.state });
+      }
+      const ids = [...new Set(activePlayers.map((player) => player.id))];
+      let names = new Map();
+      if (ids.length) {
+        const placeholders = ids.map(() => "?").join(",");
+        const profiles = await env.DB.prepare("SELECT speedrun_user_id, display_name FROM profiles WHERE speedrun_user_id IN (" + placeholders + ")").bind(...ids).all();
+        names = new Map((profiles.results ?? []).map((row) => [row.speedrun_user_id, row.display_name]));
+      }
+      for (const player of activePlayers) {
+        players.set(player.id, {
+          id: player.id,
+          name: names.get(player.id) || player.id,
+          state: player.state,
+          game: "Tomb Raider: Anniversary"
+        });
+      }
+      return json({ players: [...players.values()].slice(0, 20) });
+    }
+
+    if (request.method === "GET" && url.pathname === "/public/leaderboards") {
+      const game = url.searchParams.get("game") || "anniversary";
+      const level = url.searchParams.get("level") || "all";
+      const category = url.searchParams.get("category") || "all";
+      const subcategory = url.searchParams.get("subcategory") || "all";
+      if (game !== "anniversary"
+          || (level !== "all" && !LEVELS.includes(level))
+          || (category !== "all" && !CATEGORIES.includes(category))
+          || (subcategory !== "all" && !SUBCATEGORIES.includes(subcategory))) {
+        return json({ error: "Invalid leaderboard filter." }, 400);
+      }
+      const results = await env.DB.prepare(
+        "WITH best AS (" +
+        " SELECT r.speedrun_user_id, p.display_name, r.level, r.category, r.subcategory," +
+        " MIN(r.igt_milliseconds) AS best_igt_milliseconds, COUNT(*) AS wins" +
+        " FROM match_results r" +
+        " JOIN match_outcomes o ON o.match_id = r.match_id AND o.winner_player_id = r.player_id" +
+        " LEFT JOIN profiles p ON p.speedrun_user_id = r.speedrun_user_id" +
+        " WHERE (? = 'all' OR r.level = ?) AND (? = 'all' OR r.category = ?)" +
+        " AND (? = 'all' OR r.subcategory = ?)" +
+        " GROUP BY r.speedrun_user_id, r.level, r.category, r.subcategory" +
+        "), ranked AS (SELECT *, ROW_NUMBER() OVER (" +
+        " PARTITION BY level, category, subcategory ORDER BY best_igt_milliseconds ASC" +
+        ") AS rank FROM best)" +
+        " SELECT * FROM ranked WHERE rank <= ? ORDER BY level, category, subcategory, rank LIMIT 1200"
+      ).bind(level, level, category, category, subcategory, subcategory, level === "all" ? 10 : 100).all();
+      return json({ entries: (results.results ?? []).map((row) => ({
+        rank: Number(row.rank),
+        playerId: row.speedrun_user_id,
+        playerName: row.display_name || row.speedrun_user_id,
+        level: row.level,
+        category: row.category,
+        subcategory: row.subcategory,
+        time: formatIgt(Number(row.best_igt_milliseconds)),
+        wins: Number(row.wins)
+      })) });
+    }
+
+    if (request.method === "GET" && url.pathname === "/auth/me") {
+      const session = await sessionFor(env, browserToken(request));
+      if (!session) return json({ error: "Not signed in." }, 401);
+      const stats = await env.DB.prepare(
+        "SELECT COUNT(*) AS finishes," +
+        " SUM(CASE WHEN o.winner_player_id = r.player_id THEN 1 ELSE 0 END) AS winning_finishes" +
+        " FROM match_results r LEFT JOIN match_outcomes o ON o.match_id = r.match_id" +
+        " WHERE r.speedrun_user_id = ?"
+      ).bind(session.speedrun_user_id).first();
+      return json({
+        profile: { id: session.speedrun_user_id, displayName: session.display_name },
+        stats: {
+          finishes: Number(stats?.finishes ?? 0),
+          winningFinishes: Number(stats?.winning_finishes ?? 0)
+        }
+      });
+    }
+
+    if (request.method === "POST" && url.pathname === "/auth/logout") {
+      if (request.headers.get("Origin") !== "https://trsr.app") {
+        return json({ error: "Invalid origin." }, 403);
+      }
+      const token = browserToken(request);
+      if (token) {
+        await env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(await hash(token)).run();
+      }
+      return new Response(JSON.stringify({ status: "signed_out" }), {
+        headers: {
+          ...headers,
+          "Set-Cookie": "trsr_session=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax"
+        }
+      });
+    }
+
     if (request.method === "POST" && url.pathname === "/auth/speedrun") {
+      const browserOrigin = request.headers.get("Origin");
+      if (browserOrigin && browserOrigin !== "https://trsr.app") {
+        return json({ error: "Invalid origin." }, 403);
+      }
       const data = await body(request);
       const apiKey = typeof data?.apiKey === "string" ? data.apiKey.trim() : "";
       if (!apiKey) return json({ error: "A Speedrun.com API key is required." }, 400);
@@ -46,7 +191,17 @@ export default {
         env.DB.prepare(`DELETE FROM sessions WHERE expires_at <= ?`).bind(now),
         env.DB.prepare(`INSERT INTO sessions (token_hash, speedrun_user_id, created_at, expires_at) VALUES (?, ?, ?, ?)`).bind(await hash(token), user.id, now, expiresAt)
       ]);
-      return json({ status: "linked", sessionToken: token, profile: { id: user.id, displayName } });
+      const profile = { id: user.id, displayName };
+      if (browserOrigin === "https://trsr.app") {
+        return new Response(JSON.stringify({ status: "linked", profile }), {
+          headers: {
+            ...headers,
+            "Set-Cookie": "trsr_session=" + encodeURIComponent(token)
+              + "; Max-Age=7776000; Path=/; HttpOnly; Secure; SameSite=Lax"
+          }
+        });
+      }
+      return json({ status: "linked", sessionToken: token, profile });
     }
 
     if (request.method === "POST" && url.pathname === "/auth/session") {

@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101518" />
+    <meta name="description" content="TRSR is a head-to-head speedrunning platform for Tomb Raider games." />
+    <title>TRSR — Tomb Raider Speedrun Races</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="site-shell">
+      <header class="topbar">
+        <a class="brand" href="#home" aria-label="TRSR home">
+          <span class="brand-mark" aria-hidden="true">△</span>
+          <span><strong>TRSR</strong><small>Tomb Raider Speedrun Races</small></span>
+        </a>
+        <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">
+          <span></span><span></span><span></span><span class="sr-only">Open navigation</span>
+        </button>
+        <nav id="site-nav" class="site-nav" aria-label="Primary navigation">
+          <a class="active" href="#home">Home</a>
+          <a href="#leaderboards">Leaderboards</a>
+          <a href="#players">Players</a>
+          <a href="#profile">Profile</a>
+          <a href="#download">Download</a>
+          <a href="#about">About</a>
+        </nav>
+        <button class="button button-outline account-button" type="button" data-open-login>Connect Speedrun.com</button>
+      </header>
+
+      <main>
+        <section id="home" class="hero section">
+          <div class="hero-copy">
+            <p class="eyebrow"><span></span> Tomb Raider: Anniversary</p>
+            <h1>Head-to-head<br /><em>speedrun races.</em></h1>
+            <p class="hero-text">Find an opponent, start the same level together, and track the match through the TRSR client. Anniversary is the first supported game.</p>
+            <div class="hero-actions">
+              <a class="button button-primary" href="#download">Download the client <span>→</span></a>
+              <a class="text-link" href="#leaderboards">View leaderboards <span>↗</span></a>
+            </div>
+          </div>
+          <aside class="live-card" aria-label="Current TRSR activity">
+            <div class="card-heading"><span class="live-dot"></span><span>CURRENT ACTIVITY</span><span id="data-mode" class="data-mode">LOADING</span></div>
+            <div class="live-numbers">
+              <div><strong id="online-count">—</strong><span>Active players</span></div>
+              <div><strong id="queue-count">—</strong><span>In queue</span></div>
+              <div><strong id="race-count">—</strong><span>In a race</span></div>
+            </div>
+            <div class="live-footer"><span>Supported game</span><strong>Tomb Raider: Anniversary</strong></div>
+          </aside>
+        </section>
+
+        <section class="game-strip" aria-label="Supported games">
+          <p>GAMES</p>
+          <div class="game-pills">
+            <span class="game-pill active">Anniversary <b>SUPPORTED</b></span>
+            <span class="game-pill">Legend <b>PLANNED</b></span>
+            <span class="game-pill">Underworld <b>PLANNED</b></span>
+          </div>
+        </section>
+
+        <section id="leaderboards" class="section content-section">
+          <div class="section-heading">
+            <div><p class="eyebrow"><span></span> Match results</p><h2>Leaderboards</h2></div>
+            <a class="text-link" href="#download">Download client <span>→</span></a>
+          </div>
+          <div class="filters" aria-label="Leaderboard filters">
+            <label>Game
+              <select id="game-filter"><option value="anniversary">Tomb Raider: Anniversary</option><option disabled>Legend — planned</option><option disabled>Underworld — planned</option></select>
+            </label>
+            <label>Level
+              <select id="level-filter">
+                <option value="all">All levels</option>
+                <option>Mountain Caves</option><option>City of Vilcabamba</option><option>The Lost Valley</option>
+                <option>Tomb of Qualopec</option><option>St. Francis Folly</option><option>The Coliseum</option>
+                <option>Midas Palace</option><option>Tomb of Tihocan</option><option>Temple of Khamoon</option>
+                <option>Obelisk of Khamoon</option><option>Sanctuary of the Scion</option><option>Natla's Mines</option>
+                <option>The Great Pyramid</option><option>Final Conflict</option><option>Croft Manor</option>
+              </select>
+            </label>
+            <label>Category
+              <select id="category-filter"><option value="all">All categories</option><option>Any%</option><option>100%</option></select>
+            </label>
+            <label>Subcategory
+              <select id="subcategory-filter"><option value="all">All subcategories</option><option>No Bug Jump</option><option>Bug Jump</option><option>Better Than Glitchless</option><option>Glitchless</option></select>
+            </label>
+          </div>
+          <div class="table-wrap">
+            <table class="leaderboard-table">
+              <thead><tr><th>#</th><th>Player</th><th>Level</th><th>Category</th><th>Subcategory</th><th>IGT</th><th>Wins</th></tr></thead>
+              <tbody id="leaderboard-body"><tr class="loading-row"><td colspan="7">Loading results…</td></tr></tbody>
+            </table>
+          </div>
+          <p class="fine-print">TRSR match results will appear here when the public leaderboard API is available.</p>
+        </section>
+
+        <section id="players" class="section content-section split-section">
+          <div>
+            <p class="eyebrow"><span></span> Current activity</p>
+            <h2>Players</h2>
+            <p class="section-text">See players who are online, waiting in a queue, or racing.</p>
+            <a class="button button-outline" href="#download">Download client <span>→</span></a>
+          </div>
+          <div class="player-panel">
+            <div class="panel-header"><strong>Player activity</strong><span id="presence-updated">Loading…</span></div>
+            <ul id="player-list" class="player-list" aria-live="polite"><li class="loading-player">Loading player activity…</li></ul>
+          </div>
+        </section>
+
+        <section id="profile" class="section content-section split-section">
+          <div>
+            <p class="eyebrow"><span></span> Account</p>
+            <h2>Profile</h2>
+            <p class="section-text">Connect your Speedrun.com account to see your TRSR race stats.</p>
+          </div>
+          <div class="player-panel">
+            <div class="panel-header"><strong id="profile-name">Not connected</strong><span id="profile-state">Signed out</span></div>
+            <ul class="player-list">
+              <li><span>Winning finishes</span><strong id="profile-wins">—</strong></li>
+              <li><span>Runs finished</span><strong id="profile-best">—</strong></li>
+            </ul>
+            <div class="profile-actions">
+              <button id="profile-connect" class="button button-outline" type="button" data-open-login>Connect Speedrun.com</button>
+              <button id="logout-button" class="button button-outline" type="button" hidden>Sign out</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="download" class="section download-section">
+          <div><p class="eyebrow"><span></span> Windows client</p><h2>Download TRSR</h2><p class="section-text">The current client supports Tomb Raider: Anniversary on Windows.</p></div>
+          <div class="download-card">
+            <div><span class="version-tag">PROTOTYPE</span><h3>TRSR: Anniversary</h3><p>Windows client · Tomb Raider: Anniversary</p></div>
+            <div class="download-actions">
+              <a id="download-link" class="button button-primary" href="https://github.com/amedrii/TRASR/releases">GitHub releases <span>↓</span></a>
+              <a id="github-link" class="text-link" href="https://github.com/amedrii/TRASR">Source code <span>↗</span></a>
+            </div>
+          </div>
+        </section>
+
+        <section id="about" class="section about-section">
+          <div class="about-mark" aria-hidden="true">△</div>
+          <div>
+            <p class="eyebrow"><span></span> About</p><h2>About TRSR</h2>
+            <p class="section-text">TRSR is an unofficial head-to-head speedrunning project for Tomb Raider games. Tomb Raider: Anniversary is supported first, with room for more games later.</p>
+            <div class="about-links"><a href="https://github.com/amedrii/TRASR">GitHub</a><a href="https://www.speedrun.com/tra">Speedrun.com</a></div>
+          </div>
+        </section>
+      </main>
+
+      <footer><span>TRSR · Tomb Raider Speedrun Races</span><span>Unofficial fan project. Not affiliated with the game publishers or Speedrun.com.</span></footer>
+    </div>
+
+    <dialog id="login-dialog" class="login-dialog">
+      <form id="login-form" method="post">
+        <button class="dialog-close" type="button" aria-label="Close" data-close-login>×</button>
+        <p class="eyebrow"><span></span> Account</p><h2>Connect Speedrun.com</h2>
+        <p>Your API key is used once to verify your account. TRSR does not save the key.</p>
+        <label for="api-key">Speedrun.com API key</label>
+        <input id="api-key" name="api-key" type="password" autocomplete="off" required />
+        <p id="login-message" class="login-message" aria-live="polite"></p>
+        <button class="button button-primary" type="submit" disabled>Connect account <span>→</span></button>
+        <a class="text-link" href="https://www.speedrun.com/settings" target="_blank" rel="noreferrer">Find your API key <span>↗</span></a>
+      </form>
+    </dialog>
+
+    <script src="app.js"></script>
+  </body>
+</html>

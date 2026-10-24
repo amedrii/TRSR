@@ -1,12 +1,12 @@
-# TRASR — Tomb Raider Anniversary Speedrunning
+# TRSR — Tomb Raider Speedrun Races
 
-Lightweight Tomb Raider: Anniversary race client.
+TRSR contains the website, matchmaking backend, and Tomb Raider race clients. TRASR is the Tomb Raider: Anniversary desktop client.
 
 TRASR is a small Windows desktop app for racing Tomb Raider: Anniversary head-to-head. It handles Speedrun.com sign-in, matchmaking, opponent status, race forfeits, synchronized run starts, and automatic finish submission. Built with C++17, Qt 6, a Cloudflare Worker backend, and screen-based completion detection.
 
 ## Start
 
-Download the latest Windows release from [Releases](../../releases), extract it, and run `TRASR.exe`. Keep all files distributed alongside the executable together.
+For the current prototype, download the Windows build from [TRASR releases](https://github.com/amedrii/TRASR/releases), extract it, and run `TRASR.exe`. Keep all files distributed alongside the executable together.
 
 1. Start TRASR and sign in with Speedrun.com.
 2. Select the level, category, and subcategory.
@@ -61,6 +61,10 @@ The `worker` directory contains the Cloudflare Worker and D1 database migrations
 
 Apply new SQL files in `worker/migrations` to the production D1 database in numeric order before deploying the updated Worker. The backend stores matchmaking state, player presence, scheduled starts, match outcomes, and forfeits.
 
+## Website
+
+The new static website is in `web/`; see [website notes](web/README.md). The root `index.html` remains the current placeholder page. Deploy the updated Worker and verify production data before switching GitHub Pages to the new site.
+
 ## Validation
 
 The completion detector requires the selected level's title and the level-completion screen to remain visible for multiple checks before it emits a completion event.
@@ -78,6 +82,7 @@ Live matchmaking, completion detection, and level-end routes are still actively 
 - `tra_process.*`: Tomb Raider: Anniversary process and memory reader.
 - `tools/`: completion detection and menu-navigation scripts.
 - `worker/`: Cloudflare Worker source and D1 migrations.
+- `web/`: static website source.
 
 ## Disclaimer
 

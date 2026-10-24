@@ -1,0 +1,5 @@
+*.pre-*.html
+*.pre-*.js
+*.pre-*.css
+*.pre-*.md
+.gitignore.pre-*
