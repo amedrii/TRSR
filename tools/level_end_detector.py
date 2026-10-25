@@ -163,8 +163,8 @@ def emit_event(event: CompletionEvent, event_file: Optional[Path], webhook: Opti
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--level", required=True, help="Exact selected TRSR level name.")
-    parser.add_argument("--poll-seconds", type=float, default=0.40)
-    parser.add_argument("--confirmations", type=int, default=3,
+    parser.add_argument("--poll-seconds", type=float, default=0.10)
+    parser.add_argument("--confirmations", type=int, default=2,
                         help="Consecutive matching frames required before one event is emitted.")
     parser.add_argument("--event-file", type=Path,
                         help="Append the verified JSON event to this local file.")

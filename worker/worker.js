@@ -5,6 +5,12 @@ const headers = { "Access-Control-Allow-Origin": "https://trsr.app", "Access-Con
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers });
 const randomItem = (items) => items[Math.floor(Math.random() * items.length)];
 const queueKey = (type, level, category, subcategory) => type === "random" ? "random" : `ruleset:${level}:${category}:${subcategory}`;
+const GO_COUNTDOWN_MS = 5000;
+const EARLY_START_TOLERANCE_MS = 750;
+const FINISH_GRACE_MS = 5000;
+const MINIMUM_FINISH_WINDOW_MS = 10000;
+const MAXIMUM_FINISH_WINDOW_MS = 30000;
+const ADMIN_DISPLAY_NAME = "amedrii";
 
 async function body(request) {
   try { return await request.json(); } catch { return null; }
@@ -19,6 +25,41 @@ async function sessionFor(env, token) {
   if (typeof token !== "string" || !token.trim()) return null;
   return env.DB.prepare(`SELECT sessions.speedrun_user_id, profiles.display_name FROM sessions JOIN profiles ON profiles.speedrun_user_id = sessions.speedrun_user_id WHERE sessions.token_hash = ? AND sessions.expires_at > ?`)
     .bind(await hash(token), new Date().toISOString()).first();
+}
+
+async function resolveExpiredFinishWindow(env, matchId, nowMilliseconds = Date.now()) {
+  const existingOutcome = await env.DB.prepare(
+    `SELECT winner_player_id, winner_igt_milliseconds, decided_at_utc
+     FROM match_outcomes WHERE match_id = ?`
+  ).bind(matchId).first();
+  if (existingOutcome) return { outcome: existingOutcome, window: null };
+
+  const window = await env.DB.prepare(
+    `SELECT first_finisher_player_id, first_finish_igt_milliseconds,
+            first_finished_at_utc, finish_deadline_utc
+     FROM match_finish_windows WHERE match_id = ?`
+  ).bind(matchId).first();
+  if (!window || Date.parse(window.finish_deadline_utc) > nowMilliseconds) {
+    return { outcome: null, window };
+  }
+
+  const decidedAtUtc = new Date(nowMilliseconds).toISOString();
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO match_outcomes
+       (match_id, winner_player_id, winner_igt_milliseconds, decided_at_utc)
+     VALUES (?, ?, ?, ?)`
+  ).bind(
+    matchId,
+    window.first_finisher_player_id,
+    window.first_finish_igt_milliseconds,
+    decidedAtUtc
+  ).run();
+
+  const outcome = await env.DB.prepare(
+    `SELECT winner_player_id, winner_igt_milliseconds, decided_at_utc
+     FROM match_outcomes WHERE match_id = ?`
+  ).bind(matchId).first();
+  return { outcome, window };
 }
 
 function formatIgt(milliseconds) {
@@ -209,6 +250,33 @@ export default {
       return session ? json({ status: "valid", profile: { id: session.speedrun_user_id, displayName: session.display_name } }) : json({ error: "Your TRSR login has expired." }, 401);
     }
 
+    if (request.method === "POST" && url.pathname === "/admin/overview") {
+      const session = await sessionFor(env, (await body(request))?.sessionToken);
+      if (!session) return json({ error: "Your TRSR login has expired." }, 401);
+      if (session.display_name.toLocaleLowerCase() !== ADMIN_DISPLAY_NAME) {
+        return json({ error: "Administrator access is required." }, 403);
+      }
+      const activeCutoff = new Date(Date.now() - 90000).toISOString();
+      const [queued, activeMatches, running, recentResults] = await env.DB.batch([
+        env.DB.prepare(`SELECT COUNT(*) AS total FROM queue_entries`),
+        env.DB.prepare(`SELECT COUNT(DISTINCT match_id) AS total FROM match_presence WHERE updated_at_utc >= ?`)
+          .bind(activeCutoff),
+        env.DB.prepare(`SELECT COUNT(*) AS total FROM match_presence WHERE updated_at_utc >= ? AND state IN ('running', 'restarted')`)
+          .bind(activeCutoff),
+        env.DB.prepare(`SELECT COUNT(*) AS total FROM match_outcomes WHERE decided_at_utc >= ?`)
+          .bind(new Date(Date.now() - 86400000).toISOString())
+      ]);
+      return json({
+        status: "ok",
+        overview: {
+          queuedPlayers: Number(queued.results?.[0]?.total ?? 0),
+          activeMatches: Number(activeMatches.results?.[0]?.total ?? 0),
+          runnersInLevel: Number(running.results?.[0]?.total ?? 0),
+          resultsLast24Hours: Number(recentResults.results?.[0]?.total ?? 0)
+        }
+      });
+    }
+
     if (request.method === "POST" && url.pathname === "/queue/cancel") {
       const data = await body(request);
       const playerId = typeof data?.playerId === "string" ? data.playerId.trim() : "";
@@ -281,7 +349,32 @@ export default {
       );
       if (!isParticipant) return json({ error: "This status does not belong to your active match." }, 403);
 
-      const now = new Date().toISOString();
+      const nowMilliseconds = Date.now();
+      const now = new Date(nowMilliseconds).toISOString();
+      let navigationSchedule = await env.DB.prepare(
+        `SELECT start_at_utc FROM match_navigation_schedule WHERE match_id = ?`
+      ).bind(match.id).first();
+
+      if (state === "running") {
+        if (!navigationSchedule) {
+          return json({
+            status: "start_rejected",
+            error: "Both players must pass the Ready check before starting."
+          }, 409);
+        }
+        if (nowMilliseconds + EARLY_START_TOLERANCE_MS
+            < Date.parse(navigationSchedule.start_at_utc)) {
+          return json({
+            status: "start_rejected",
+            error: "The level was entered before the shared GO signal."
+          }, 409);
+        }
+        await env.DB.prepare(
+          `INSERT OR IGNORE INTO match_race_starts (match_id, player_id, started_at_utc)
+           VALUES (?, ?, ?)`
+        ).bind(match.id, playerId, now).run();
+      }
+
       await env.DB.prepare(
         `INSERT INTO match_presence (match_id, player_id, state, igt_milliseconds, updated_at_utc)
          VALUES (?, ?, ?, ?, ?)
@@ -298,76 +391,93 @@ export default {
       const presenceByPlayer = new Map(
         (rows.results ?? []).map((row) => [row.player_id, row])
       );
-      let navigationStartAtUtc = null;
       const bothPlayersReady = match.players.length === 2 && match.players.every(
         (player) => presenceByPlayer.get(player.playerId)?.state === "ready"
       );
-      if (bothPlayersReady) {
+      if (bothPlayersReady && !navigationSchedule) {
         await env.DB.prepare(
           `INSERT OR IGNORE INTO match_navigation_schedule (match_id, start_at_utc, created_at_utc)
            VALUES (?, ?, ?)`
         ).bind(
           match.id,
-          new Date(Date.now() + 5000).toISOString(),
+          new Date(nowMilliseconds + GO_COUNTDOWN_MS).toISOString(),
           now
         ).run();
-        const schedule = await env.DB.prepare(
+        navigationSchedule = await env.DB.prepare(
           `SELECT start_at_utc FROM match_navigation_schedule WHERE match_id = ?`
         ).bind(match.id).first();
-        navigationStartAtUtc = schedule?.start_at_utc ?? null;
-      } else {
-        await env.DB.prepare(
-          `DELETE FROM match_navigation_schedule WHERE match_id = ?`
-        ).bind(match.id).run();
       }
+      const navigationStartAtUtc = navigationSchedule?.start_at_utc ?? null;
       const navigationDelayMilliseconds = navigationStartAtUtc
-        ? Math.max(0, Date.parse(navigationStartAtUtc) - Date.now())
+        ? Math.max(0, Date.parse(navigationStartAtUtc) - nowMilliseconds)
         : null;
 
-      let startAtUtc = null;
-      const bothPlayersArmed = match.players.length === 2 && match.players.every(
-        (player) => presenceByPlayer.get(player.playerId)?.state === "armed"
+      const starts = await env.DB.prepare(
+        `SELECT player_id, started_at_utc FROM match_race_starts WHERE match_id = ?`
+      ).bind(match.id).all();
+      const startsByPlayer = new Map(
+        (starts.results ?? []).map((row) => [row.player_id, row.started_at_utc])
       );
-      if (bothPlayersArmed) {
-        await env.DB.prepare(
-          `INSERT OR IGNORE INTO match_start_schedule (match_id, start_at_utc, created_at_utc)
-           VALUES (?, ?, ?)`
-        ).bind(
-          match.id,
-          new Date(Date.now() + 8000).toISOString(),
-          now
-        ).run();
-        const schedule = await env.DB.prepare(
-          `SELECT start_at_utc FROM match_start_schedule WHERE match_id = ?`
-        ).bind(match.id).first();
-        startAtUtc = schedule?.start_at_utc ?? null;
-      }
-      const startDelayMilliseconds = startAtUtc
-        ? Math.max(0, Date.parse(startAtUtc) - Date.now())
-        : null;
-      const outcome = await env.DB.prepare(
-        `SELECT winner_player_id, winner_igt_milliseconds, decided_at_utc
-         FROM match_outcomes WHERE match_id = ?`
-      ).bind(match.id).first();
+      const raceState = await resolveExpiredFinishWindow(env, match.id, nowMilliseconds);
+      const finishWindow = raceState.window;
       return json({
         status: "matched",
         navigationStartAtUtc,
         navigationDelayMilliseconds,
-        startAtUtc,
-        startDelayMilliseconds,
-        winnerPlayerId: outcome?.winner_player_id ?? null,
-        winnerIgtMilliseconds: outcome?.winner_igt_milliseconds ?? null,
-        decidedAtUtc: outcome?.decided_at_utc ?? null,
+        winnerPlayerId: raceState.outcome?.winner_player_id ?? null,
+        winnerIgtMilliseconds: raceState.outcome?.winner_igt_milliseconds ?? null,
+        decidedAtUtc: raceState.outcome?.decided_at_utc ?? null,
+        firstFinisherPlayerId: finishWindow?.first_finisher_player_id ?? null,
+        finishDeadlineUtc: finishWindow?.finish_deadline_utc ?? null,
         players: match.players.map((player) => {
           const presence = presenceByPlayer.get(player.playerId);
           return {
             playerId: player.playerId,
             state: presence?.state ?? "waiting",
             igtMilliseconds: presence?.igt_milliseconds ?? null,
-            updatedAtUtc: presence?.updated_at_utc ?? null
+            updatedAtUtc: presence?.updated_at_utc ?? null,
+            startedAtUtc: startsByPlayer.get(player.playerId) ?? null
           };
         })
       });
+    }
+    if (request.method === "POST"
+        && url.pathname.startsWith("/matches/")
+        && url.pathname.endsWith("/cancel")) {
+      const playerId = decodeURIComponent(
+        url.pathname.slice("/matches/".length, -"/cancel".length)
+      );
+      const data = await body(request);
+      const session = await sessionFor(env, data?.sessionToken);
+      if (!playerId) return json({ error: "A player is required." }, 400);
+      if (!session) return json({ error: "Link your Speedrun.com account before leaving staging." }, 401);
+
+      const stored = await env.DB.prepare(`SELECT match_json FROM matches WHERE player_id = ?`)
+        .bind(playerId).first();
+      if (!stored) return json({ status: "none" });
+      const match = JSON.parse(stored.match_json);
+      const isParticipant = match.players?.some((player) =>
+        player.playerId === playerId && player.speedrunUserId === session.speedrun_user_id
+      );
+      if (!isParticipant) return json({ error: "This cancellation does not belong to your active match." }, 403);
+
+      const [outcome, raceStarts] = await env.DB.batch([
+        env.DB.prepare(`SELECT 1 AS present FROM match_outcomes WHERE match_id = ?`).bind(match.id),
+        env.DB.prepare(`SELECT COUNT(*) AS total FROM match_race_starts WHERE match_id = ?`).bind(match.id)
+      ]);
+      if (outcome.results?.length || Number(raceStarts.results?.[0]?.total ?? 0) > 0) {
+        return json({ error: "The race has started. Use Forfeit match instead." }, 409);
+      }
+
+      await env.DB.batch([
+        env.DB.prepare(`DELETE FROM match_presence WHERE match_id = ?`).bind(match.id),
+        env.DB.prepare(`DELETE FROM match_navigation_schedule WHERE match_id = ?`).bind(match.id),
+        env.DB.prepare(`DELETE FROM match_start_schedule WHERE match_id = ?`).bind(match.id),
+        env.DB.prepare(`DELETE FROM match_race_starts WHERE match_id = ?`).bind(match.id),
+        env.DB.prepare(`DELETE FROM match_finish_windows WHERE match_id = ?`).bind(match.id),
+        ...match.players.map((player) => env.DB.prepare(`DELETE FROM matches WHERE player_id = ?`).bind(player.playerId))
+      ]);
+      return json({ status: "cancelled" });
     }
     if (request.method === "POST"
         && url.pathname.startsWith("/matches/")
@@ -458,44 +568,111 @@ export default {
         return json({ error: "This result does not match the active ruleset." }, 409);
       }
 
-      const existingOutcome = await env.DB.prepare(
-        `SELECT winner_player_id, winner_igt_milliseconds, decided_at_utc
-         FROM match_outcomes WHERE match_id = ?`
-      ).bind(match.id).first();
-      if (existingOutcome) {
+      const nowMilliseconds = Date.now();
+      const resolvedRace = await resolveExpiredFinishWindow(
+        env, match.id, nowMilliseconds
+      );
+      if (resolvedRace.outcome) {
         return json({
           status: "already_decided",
-          winnerPlayerId: existingOutcome.winner_player_id,
-          winnerIgtMilliseconds: existingOutcome.winner_igt_milliseconds,
-          decidedAtUtc: existingOutcome.decided_at_utc,
-          youWon: existingOutcome.winner_player_id === playerId
+          winnerPlayerId: resolvedRace.outcome.winner_player_id,
+          winnerIgtMilliseconds: resolvedRace.outcome.winner_igt_milliseconds,
+          decidedAtUtc: resolvedRace.outcome.decided_at_utc,
+          youWon: resolvedRace.outcome.winner_player_id === playerId
         });
       }
 
-      const now = new Date().toISOString();
-      const writes = await env.DB.batch([
-        env.DB.prepare(
-          `INSERT OR IGNORE INTO match_results
-            (match_id, speedrun_user_id, player_id, level, category, subcategory,
-             igt_milliseconds, build_hash, confirmed_at_utc)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      const ownStart = await env.DB.prepare(
+        `SELECT started_at_utc FROM match_race_starts
+         WHERE match_id = ? AND player_id = ?`
+      ).bind(match.id, playerId).first();
+      if (!ownStart) {
+        return json({ error: "Ready up and wait for GO before submitting a ranked result." }, 409);
+      }
+
+      const now = new Date(nowMilliseconds).toISOString();
+      const write = await env.DB.prepare(
+        `INSERT OR IGNORE INTO match_results
+          (match_id, speedrun_user_id, player_id, level, category, subcategory,
+           igt_milliseconds, build_hash, confirmed_at_utc)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        match.id, session.speedrun_user_id, playerId, match.level, match.category,
+        match.subcategory, igtMilliseconds, buildHash, now
+      ).run();
+
+      let finishWindow = await env.DB.prepare(
+        `SELECT first_finisher_player_id, first_finish_igt_milliseconds,
+                first_finished_at_utc, finish_deadline_utc
+         FROM match_finish_windows WHERE match_id = ?`
+      ).bind(match.id).first();
+
+      if (!finishWindow) {
+        const starts = await env.DB.prepare(
+          `SELECT player_id, started_at_utc FROM match_race_starts WHERE match_id = ?`
+        ).bind(match.id).all();
+        const startsByPlayer = new Map(
+          (starts.results ?? []).map((row) => [row.player_id, Date.parse(row.started_at_utc)])
+        );
+        const opponent = match.players.find((player) => player.playerId !== playerId);
+        const startSkewMilliseconds = opponent && startsByPlayer.has(opponent.playerId)
+          ? Math.max(0, startsByPlayer.get(opponent.playerId) - startsByPlayer.get(playerId))
+          : 0;
+        const finishWindowMilliseconds = Math.min(
+          MAXIMUM_FINISH_WINDOW_MS,
+          Math.max(MINIMUM_FINISH_WINDOW_MS, FINISH_GRACE_MS + startSkewMilliseconds)
+        );
+        await env.DB.prepare(
+          `INSERT OR IGNORE INTO match_finish_windows
+            (match_id, first_finisher_player_id, first_finish_igt_milliseconds,
+             first_finished_at_utc, finish_deadline_utc)
+           VALUES (?, ?, ?, ?, ?)`
         ).bind(
-          match.id, session.speedrun_user_id, playerId, match.level, match.category,
-          match.subcategory, igtMilliseconds, buildHash, now
-        ),
-        env.DB.prepare(
-          `INSERT OR IGNORE INTO match_outcomes
-            (match_id, winner_player_id, winner_igt_milliseconds, decided_at_utc)
-           VALUES (?, ?, ?, ?)`
-        ).bind(match.id, playerId, igtMilliseconds, now)
-      ]);
+          match.id,
+          playerId,
+          igtMilliseconds,
+          now,
+          new Date(nowMilliseconds + finishWindowMilliseconds).toISOString()
+        ).run();
+        finishWindow = await env.DB.prepare(
+          `SELECT first_finisher_player_id, first_finish_igt_milliseconds,
+                  first_finished_at_utc, finish_deadline_utc
+           FROM match_finish_windows WHERE match_id = ?`
+        ).bind(match.id).first();
+      }
+
+      const submittedResults = await env.DB.prepare(
+        `SELECT player_id, igt_milliseconds FROM match_results WHERE match_id = ?`
+      ).bind(match.id).all();
+      const results = submittedResults.results ?? [];
+      if (results.length < 2) {
+        return json({
+          status: write.meta.changes > 0 ? "provisional" : "already_submitted",
+          firstFinisherPlayerId: finishWindow.first_finisher_player_id,
+          finishDeadlineUtc: finishWindow.finish_deadline_utc
+        });
+      }
+
+      const firstResult = results.find(
+        (result) => result.player_id === finishWindow.first_finisher_player_id
+      );
+      const secondResult = results.find(
+        (result) => result.player_id !== finishWindow.first_finisher_player_id
+      );
+      const winner = Number(secondResult.igt_milliseconds) < Number(firstResult.igt_milliseconds)
+        ? secondResult : firstResult;
+      await env.DB.prepare(
+        `INSERT OR IGNORE INTO match_outcomes
+          (match_id, winner_player_id, winner_igt_milliseconds, decided_at_utc)
+         VALUES (?, ?, ?, ?)`
+      ).bind(match.id, winner.player_id, winner.igt_milliseconds, now).run();
       const outcome = await env.DB.prepare(
         `SELECT winner_player_id, winner_igt_milliseconds, decided_at_utc
          FROM match_outcomes WHERE match_id = ?`
       ).bind(match.id).first();
 
       return json({
-        status: writes[0].meta.changes > 0 ? "submitted" : "already_submitted",
+        status: "completed",
         winnerPlayerId: outcome.winner_player_id,
         winnerIgtMilliseconds: outcome.winner_igt_milliseconds,
         decidedAtUtc: outcome.decided_at_utc,
@@ -507,9 +684,8 @@ export default {
       const result = await env.DB.prepare(`SELECT match_json FROM matches WHERE player_id = ?`).bind(playerId).first();
       if (!result) return json({ status: "none" });
       const match = JSON.parse(result.match_json);
-      const outcome = await env.DB.prepare(
-        `SELECT winner_player_id, decided_at_utc FROM match_outcomes WHERE match_id = ?`
-      ).bind(match.id).first();
+      const raceState = await resolveExpiredFinishWindow(env, match.id);
+      const outcome = raceState.outcome;
       return outcome
         ? json({ status: "completed", match, winnerPlayerId: outcome.winner_player_id, decidedAtUtc: outcome.decided_at_utc })
         : json({ status: "matched", match });

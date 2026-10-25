@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safely arm Tomb Raider: Anniversary's Final Conflict replay screen.
+"""Verify Tomb Raider replay settings or safely arm Final Conflict replay.
 
 This prototype operates on the Tomb Raider client window only.  It reads menu
 text with Tesseract before every group of keystrokes and stops on an unexpected
@@ -251,16 +251,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--level", required=True)
     parser.add_argument("--tesseract", type=Path)
     parser.add_argument("--debug-image", type=Path)
+    parser.add_argument("--verify-replay-settings", action="store_true",
+                        help="Only verify Replay Settings; never send input.")
     parser.add_argument("--wait-for-launch", action="store_true")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    if args.level != "Final Conflict":
-        raise SystemExit("Automatic menu navigation currently supports Final Conflict only.")
     if args.tesseract:
         pytesseract.pytesseract.tesseract_cmd = str(args.tesseract)
+    if args.verify_replay_settings:
+        capture = mss.mss()
+        try:
+            wait_for(
+                capture,
+                lambda _frame, text: has_all(
+                    text, "replay settings", "difficulty", "outfits", "start game"
+                ),
+                "Replay Settings with Start Game selected",
+                args.debug_image,
+                timeout_seconds=10.0,
+            )
+            emit("replay_settings_verified")
+            return 0
+        except Exception as exc:
+            emit("menu_navigation_failed", error=str(exc))
+            return 1
+        finally:
+            capture.close()
+    if args.level != "Final Conflict":
+        raise SystemExit("Automatic menu navigation currently supports Final Conflict only.")
     try:
         hwnd, capture = arm_final_conflict(args.debug_image)
         if args.wait_for_launch:

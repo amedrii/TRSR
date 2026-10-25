@@ -285,6 +285,14 @@ QString RunMonitor::update(const RunSelection &selection)
                     : QStringLiteral("Integrity failure: ")
                           + process->blockedModule;
 
+            if (m_presence.state == QStringLiteral("running")
+                || m_presence.state == QStringLiteral("restarted")) {
+                return QStringLiteral("IGT\n%1\n\n%2")
+                    .arg(
+                        gameTimeStatus,
+                        integrityStatus
+                        );
+            }
             const bool isInMainMenu =
                 loadedLevelStatus.compare(QStringLiteral("Pu104"), Qt::CaseInsensitive) == 0
                 || loadedLevelStatus.compare(QStringLiteral("Gr104"), Qt::CaseInsensitive) == 0
