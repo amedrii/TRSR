@@ -2,7 +2,7 @@ const config = {
   apiBase: window.TRSR_API_URL || "https://api.trsr.app",
 };
 
-const githubReleaseApi = "https://api.github.com/repos/amedrii/TRSR/releases/latest";
+const githubReleaseApi = "https://api.github.com/repos/amedrii/TRASR/releases/latest";
 
 const leaderboardFilters = {
   game: document.getElementById("game-filter"),

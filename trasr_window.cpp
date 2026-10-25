@@ -48,6 +48,9 @@
 #include <thread>
 #include <utility>
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -795,30 +798,43 @@ int runTrasrApplication(QApplication &app)
 
     auto launchScreenDetector = [screenDetector, screenVerifierStatus]() {
         const QString level = screenDetector->property("selectedLevel").toString();
-        const QString scriptPath = QDir(QCoreApplication::applicationDirPath())
-                                       .filePath(QStringLiteral("tools/level_end_detector.py"));
+        const QDir appDirectory(QCoreApplication::applicationDirPath());
+        const QString bundledDetector = appDirectory.filePath(
+            QStringLiteral("tools/level_end_detector/level_end_detector.exe"));
+        const QString scriptPath = appDirectory.filePath(
+            QStringLiteral("tools/level_end_detector.py"));
 
-        if (level.isEmpty() || !QFileInfo::exists(scriptPath)) {
+        if (level.isEmpty()
+            || (!QFileInfo::exists(bundledDetector) && !QFileInfo::exists(scriptPath))) {
             screenVerifierStatus->setText(
                 QStringLiteral("Screen verifier: unavailable")
                 );
             return;
         }
 
+        QString program;
         QStringList arguments{
-            QStringLiteral("-3.13"),
-            scriptPath,
             QStringLiteral("--level"), level,
             QStringLiteral("--event-file"), screenCompletionEventPath()
         };
+        if (QFileInfo::exists(bundledDetector)) {
+            program = bundledDetector;
+        } else {
+            program = QStringLiteral("py");
+            arguments.prepend(scriptPath);
+            arguments.prepend(QStringLiteral("-3.13"));
+        }
 
-        const QString tesseractPath =
-            QStringLiteral("C:/Program Files/Tesseract-OCR/tesseract.exe");
+        QString tesseractPath = appDirectory.filePath(
+            QStringLiteral("tools/tesseract/tesseract.exe"));
+        if (!QFileInfo::exists(tesseractPath)) {
+            tesseractPath = QStringLiteral("C:/Program Files/Tesseract-OCR/tesseract.exe");
+        }
         if (QFileInfo::exists(tesseractPath)) {
             arguments << QStringLiteral("--tesseract") << tesseractPath;
         }
 
-        screenDetector->start(QStringLiteral("py"), arguments);
+        screenDetector->start(program, arguments);
         screenVerifierStatus->setText(
             QStringLiteral("Screen verifier: watching %1").arg(level)
             );
@@ -1307,9 +1323,12 @@ int runTrasrApplication(QApplication &app)
             if (!*hasActiveMatch || menuNavigator->state() != QProcess::NotRunning) {
                 return;
             }
-            const QString scriptPath = QDir(QCoreApplication::applicationDirPath())
-                                           .filePath(QStringLiteral("tools/menu_navigator.py"));
-            if (!QFileInfo::exists(scriptPath)) {
+            const QDir appDirectory(QCoreApplication::applicationDirPath());
+            const QString bundledNavigator = appDirectory.filePath(
+                QStringLiteral("tools/menu_navigator/menu_navigator.exe"));
+            const QString scriptPath = appDirectory.filePath(
+                QStringLiteral("tools/menu_navigator.py"));
+            if (!QFileInfo::exists(bundledNavigator) && !QFileInfo::exists(scriptPath)) {
                 autoStartStatus->setText(QStringLiteral("Ready check unavailable: verifier file is missing"));
                 return;
             }
@@ -1317,16 +1336,27 @@ int runTrasrApplication(QApplication &app)
             readyButton->setEnabled(false);
             autoStartStatus->setText(
                 QStringLiteral("Checking Replay Settings — keep Start Game selected…"));
+            QString program;
             QStringList arguments{
-                QStringLiteral("-3.13"), scriptPath,
                 QStringLiteral("--level"), levelSelector->currentText(),
                 QStringLiteral("--verify-replay-settings")
             };
-            const QString tesseractPath = QStringLiteral("C:/Program Files/Tesseract-OCR/tesseract.exe");
+            if (QFileInfo::exists(bundledNavigator)) {
+                program = bundledNavigator;
+            } else {
+                program = QStringLiteral("py");
+                arguments.prepend(scriptPath);
+                arguments.prepend(QStringLiteral("-3.13"));
+            }
+            QString tesseractPath = appDirectory.filePath(
+                QStringLiteral("tools/tesseract/tesseract.exe"));
+            if (!QFileInfo::exists(tesseractPath)) {
+                tesseractPath = QStringLiteral("C:/Program Files/Tesseract-OCR/tesseract.exe");
+            }
             if (QFileInfo::exists(tesseractPath)) {
                 arguments << QStringLiteral("--tesseract") << tesseractPath;
             }
-            menuNavigator->start(QStringLiteral("py"), arguments);
+            menuNavigator->start(program, arguments);
         }
         );
     QObject::connect(

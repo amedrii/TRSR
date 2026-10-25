@@ -25,6 +25,8 @@ pdb/
 # Local release packages and research files
 TRASR-*-Windows/
 TRASR-*-Windows.zip
+TRSR-*/
+TRSR-*.zip
 reference/
 __pycache__/
 *.pyc

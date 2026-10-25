@@ -1,0 +1,17 @@
+TRSR portable releases bundle third-party software so players can run the
+prototype without separately installing Python or Tesseract.
+
+Included components and their upstream licences:
+
+- Qt 6 (LGPL-3.0-only, GPL-3.0-only, or commercial licence). The bundled Qt
+  licence files are provided in the LICENSES directory.
+- CPython (Python Software Foundation License 2.0).
+- PyInstaller (GPL-2.0-or-later with the PyInstaller bootloader exception).
+- Tesseract OCR (Apache License 2.0). Its licence is provided as
+  TESSERACT_LICENSE.txt.
+- Leptonica (BSD-style licence, distributed with Tesseract).
+- Pillow (HPND License).
+- MSS (MIT License).
+- pytesseract (Apache License 2.0).
+
+TRSR does not include any Tomb Raider game audio, game files, or game music.

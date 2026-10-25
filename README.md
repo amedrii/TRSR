@@ -6,7 +6,7 @@ TRASR is a small Windows desktop app for racing Tomb Raider: Anniversary head-to
 
 ## Start
 
-For the current prototype, download the Windows build from [TRASR releases](https://github.com/amedrii/TRASR/releases), extract it, and run `TRASR.exe`. Keep all files distributed alongside the executable together.
+For the current prototype, download the Windows build from [TRASR releases](https://github.com/amedrii/TRASR/releases), extract it, and run `TRASR.exe`. Keep all files distributed alongside the executable together. Portable releases bundle their Qt, screen-verifier, and Tesseract runtimes: players do not need to install Python, Tesseract, or Python packages.
 
 1. Start TRASR and sign in with Speedrun.com.
 2. Select the level, category, and subcategory.
@@ -53,7 +53,11 @@ For source builds, install Tesseract OCR and ensure it is available at:
 
 Open `CMakeLists.txt` in Qt Creator, select an installed Qt Desktop kit, configure a Release build, and build the `TRASR` target.
 
-A future installer release will bundle the client and its detection dependencies so players will not need to set up Python or Tesseract manually.
+To produce the portable ZIP after building the Release target, run:
+
+    powershell -ExecutionPolicy Bypass -File tools\build-portable-release.ps1 -Version 0.2.1
+
+This release-build step freezes the helper scripts, bundles Tesseract, deploys the Qt runtime, and creates an upload-ready ZIP. Python and Tesseract are required only on the PC that creates the release.
 
 ## Backend deployment
 
