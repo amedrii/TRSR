@@ -1,6 +1,12 @@
 name: Deploy TRSR website
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - 'CNAME'
+      - '.github/workflows/deploy-website.yml'
   workflow_dispatch:
 
 permissions:
