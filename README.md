@@ -1,22 +1,21 @@
 # TRSR — Tomb Raider Speedrunning
 
-TRSR contains the website, matchmaking backend, and Tomb Raider race clients. TRASR is the Tomb Raider: Anniversary desktop client.
+TRSR contains the website, matchmaking backend, and Tomb Raider race clients. TRSR is the Tomb Raider: Anniversary desktop client.
 
-TRASR is a small Windows desktop app for racing Tomb Raider: Anniversary head-to-head. It handles Speedrun.com sign-in, matchmaking, opponent status, race forfeits, synchronized run starts, and automatic finish submission. Built with C++17, Qt 6, a Cloudflare Worker backend, and screen-based completion detection.
+TRSR is a small Windows desktop app for racing Tomb Raider: Anniversary head-to-head. It handles Speedrun.com sign-in, matchmaking, opponent status, race forfeits, synchronized run starts, and automatic finish submission. Built with C++17, Qt 6, a Cloudflare Worker backend, and screen-based completion detection.
 
 ## Start
 
-For the current prototype, download the Windows build from [TRASR releases](https://github.com/amedrii/TRASR/releases), extract it, and run `TRASR.exe`. Keep all files distributed alongside the executable together. Portable releases bundle their Qt, screen-verifier, and Tesseract runtimes: players do not need to install Python, Tesseract, or Python packages.
+For the current prototype, download the Windows build from [TRSR releases](https://github.com/amedrii/TRSR/releases), extract it, and run `TRASR.exe`. Keep all files distributed alongside the executable together. Portable releases bundle their Qt, screen-verifier, and Tesseract runtimes: players do not need to install Python, Tesseract, or Python packages.
 
-1. Start TRASR and sign in with Speedrun.com.
-2. Select the level, category, and subcategory.
-3. Join either the random queue or selected-ruleset queue.
-4. Wait until a match is found.
-5. Open Tomb Raider: Anniversary and leave it on the main menu with **Play Game** highlighted.
-6. Both players press **Ready** in TRASR.
-7. During the five-second countdown, focus the game window.
-8. TRASR navigates to the selected level and starts both players together.
-9. Finish the level normally. TRASR detects the completion screen and submits the result.
+1. Launch Tomb Raider: Anniversary
+2. Launch TRSR via TRASR.exe
+3. Log in with Speedrun.com
+4. Select a ruleset for ruleset queues (level will be chosen at random) or select random ruleset queue (everything will be random)
+5. When you get matched against someone, you can choose to accept or decline the match.
+6. When you accept the match, you will be given a set or rules and an RTA timer will start at T-10 seconds.
+7. During those 10 seconds, you need to launch the level from Replay Level settings.
+8. Finish the run according to the ruleset.
 
 Use **Forfeit match** if you want to leave an active match. This immediately awards the match to your opponent.
 
@@ -34,10 +33,10 @@ Use **Forfeit match** if you want to leave an active match. This immediately awa
 
 ## Current limitations
 
-- Automatic menu navigation currently supports **Final Conflict** only.
-- Before both players press Ready, each player must manually leave the game on the main menu with **Play Game** selected.
+- Reliably works only on any% categories due to no checks for secrets/save game reading.
+- Save file reading and updating will be implemented in the next patch.
 - Screen-based completion detection is still being tested across levels and display setups.
-- TRASR is currently a prototype and is not yet intended for ranked racing.
+- TRSR is currently a prototype and is not yet intended for ranked racing.
 
 ## Build
 
@@ -90,4 +89,4 @@ Live matchmaking, completion detection, and level-end routes are still actively 
 
 ## Disclaimer
 
-TRASR is an unofficial fan-made project. It is not affiliated with Crystal Dynamics, Eidos, Square Enix, Tomb Raider, or Speedrun.com.
+TRSR is an unofficial fan-made project. It is not affiliated with Crystal Dynamics, Eidos, Square Enix, Tomb Raider, or Speedrun.com.
