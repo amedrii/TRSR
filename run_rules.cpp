@@ -67,6 +67,16 @@ QString formatIgt(float seconds)
         .arg(totalSeconds % 60, 2, 10, QChar('0'));
 }
 
+QString formatRtaNoLoads(qint64 milliseconds)
+{
+    const qint64 centiseconds = qMax<qint64>(0, milliseconds / 10);
+    const qint64 totalSeconds = centiseconds / 100;
+    return QStringLiteral("%1:%2.%3")
+        .arg(totalSeconds / 60, 2, 10, QChar('0'))
+        .arg(totalSeconds % 60, 2, 10, QChar('0'))
+        .arg(centiseconds % 100, 2, 10, QChar('0'));
+}
+
 // A return value is present only after the corresponding completion portal has
 // been observed and verified. Empty means automatic finish is not supported yet.
 QString expectedEndTriggerCode(int levelIndex)

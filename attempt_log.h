@@ -15,6 +15,7 @@ struct AttemptRecord
     QString category;
     QString subcategory;
     float igtSeconds;
+    float rtaNoLoadSeconds = -1.0f;
     QString buildHash;
 };
 
@@ -46,12 +47,13 @@ inline bool appendAttempt(const AttemptRecord &record, QString *errorMessage)
     }
 
     attempts.append(QJsonObject{
-        {QStringLiteral("schemaVersion"), 1},
+        {QStringLiteral("schemaVersion"), 2},
         {QStringLiteral("level"), record.level},
         {QStringLiteral("category"), record.category},
         {QStringLiteral("subcategory"), record.subcategory},
         {QStringLiteral("difficulty"), QStringLiteral("Easy")},
         {QStringLiteral("igtSeconds"), record.igtSeconds},
+        {QStringLiteral("rtaNoLoadSeconds"), record.rtaNoLoadSeconds},
         {QStringLiteral("buildHash"), record.buildHash},
         {QStringLiteral("appVersion"), QStringLiteral("0.1.0")},
         {QStringLiteral("confirmedAtUtc"), QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)}

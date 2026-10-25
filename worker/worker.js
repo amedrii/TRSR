@@ -3,13 +3,31 @@ const CATEGORIES = ["Any%", "100%"];
 const SUBCATEGORIES = ["No Bug Jump", "Bug Jump", "Better Than Glitchless", "Glitchless"];
 const headers = { "Access-Control-Allow-Origin": "https://trsr.app", "Access-Control-Allow-Credentials": "true", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type", "Content-Type": "application/json" };
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers });
-const randomItem = (items) => items[Math.floor(Math.random() * items.length)];
-const queueKey = (type, level, category, subcategory) => type === "random" ? "random" : `ruleset:${level}:${category}:${subcategory}`;
+function randomItem(items) {
+  if (!Array.isArray(items) || items.length === 0) {
+    throw new Error("Cannot choose an item from an empty list.");
+  }
+  // Rejection sampling avoids modulo bias and uses the Worker crypto RNG,
+  // rather than the implementation-dependent Math.random().
+  const range = 0x100000000;
+  const limit = range - (range % items.length);
+  let value;
+  do {
+    value = crypto.getRandomValues(new Uint32Array(1))[0];
+  } while (value >= limit);
+  return items[value % items.length];
+}
+
+// A selected-ruleset queue fixes category/subcategory, then rolls its level
+// only after two players are paired. The level selector is not a queue filter.
+const queueKey = (type, category, subcategory) =>
+  type === "random" ? "random" : `ruleset:${category}:${subcategory}`;
 const GO_COUNTDOWN_MS = 5000;
 const EARLY_START_TOLERANCE_MS = 750;
 const FINISH_GRACE_MS = 5000;
 const MINIMUM_FINISH_WINDOW_MS = 10000;
 const MAXIMUM_FINISH_WINDOW_MS = 30000;
+const MATCH_ACCEPT_TIMEOUT_MS = 20000;
 const ADMIN_DISPLAY_NAME = "amedrii";
 
 async function body(request) {
@@ -25,6 +43,60 @@ async function sessionFor(env, token) {
   if (typeof token !== "string" || !token.trim()) return null;
   return env.DB.prepare(`SELECT sessions.speedrun_user_id, profiles.display_name FROM sessions JOIN profiles ON profiles.speedrun_user_id = sessions.speedrun_user_id WHERE sessions.token_hash = ? AND sessions.expires_at > ?`)
     .bind(await hash(token), new Date().toISOString()).first();
+}
+
+function speedrunProfileCard(user, fallbackId) {
+  return {
+    displayName: user?.names?.international ?? fallbackId,
+    avatarUrl: user?.assets?.image?.uri ?? user?.assets?.icon?.uri ?? "",
+    countryCode: user?.location?.country?.code?.toUpperCase?.() ?? ""
+  };
+}
+
+async function playerCardFor(env, speedrunUserId) {
+  const stored = await env.DB.prepare(
+    `SELECT display_name, avatar_url, country_code FROM profiles WHERE speedrun_user_id = ?`
+  ).bind(speedrunUserId).first();
+
+  if (stored?.avatar_url) {
+    return {
+      displayName: stored.display_name || speedrunUserId,
+      avatarUrl: stored.avatar_url,
+      countryCode: stored.country_code || ""
+    };
+  }
+
+  // Existing linked accounts predate avatar/country storage. Refresh their
+  // public Speedrun.com profile once instead of forcing users to relink.
+  try {
+    const response = await fetch(
+      `https://www.speedrun.com/api/v1/users/${encodeURIComponent(speedrunUserId)}`
+    );
+    if (!response.ok) throw new Error("Speedrun.com profile lookup failed.");
+    const card = speedrunProfileCard((await response.json()).data, speedrunUserId);
+    await env.DB.prepare(
+      `UPDATE profiles
+       SET display_name = ?, avatar_url = ?, country_code = ?
+       WHERE speedrun_user_id = ?`
+    ).bind(card.displayName, card.avatarUrl || null, card.countryCode || null, speedrunUserId).run();
+    return card;
+  } catch {
+    return {
+      displayName: stored?.display_name || speedrunUserId,
+      avatarUrl: "",
+      countryCode: stored?.country_code || ""
+    };
+  }
+}
+
+async function matchForClient(env, match) {
+  const cards = await Promise.all(
+    match.players.map((player) => playerCardFor(env, player.speedrunUserId))
+  );
+  return {
+    ...match,
+    players: match.players.map((player, index) => ({ ...player, profile: cards[index] }))
+  };
 }
 
 async function resolveExpiredFinishWindow(env, matchId, nowMilliseconds = Date.now()) {
@@ -60,6 +132,17 @@ async function resolveExpiredFinishWindow(env, matchId, nowMilliseconds = Date.n
      FROM match_outcomes WHERE match_id = ?`
   ).bind(matchId).first();
   return { outcome, window };
+}
+
+async function deleteMatchState(env, match) {
+  await env.DB.batch([
+    env.DB.prepare(`DELETE FROM match_presence WHERE match_id = ?`).bind(match.id),
+    env.DB.prepare(`DELETE FROM match_navigation_schedule WHERE match_id = ?`).bind(match.id),
+    env.DB.prepare(`DELETE FROM match_start_schedule WHERE match_id = ?`).bind(match.id),
+    env.DB.prepare(`DELETE FROM match_race_starts WHERE match_id = ?`).bind(match.id),
+    env.DB.prepare(`DELETE FROM match_finish_windows WHERE match_id = ?`).bind(match.id),
+    ...match.players.map((player) => env.DB.prepare(`DELETE FROM matches WHERE player_id = ?`).bind(player.playerId))
+  ]);
 }
 
 function formatIgt(milliseconds) {
@@ -223,12 +306,22 @@ export default {
       if (!response.ok) return json({ error: "Speedrun.com rejected that API key." }, 401);
       const user = (await response.json()).data;
       if (!user?.id) return json({ error: "Speedrun.com returned an unexpected profile." }, 502);
-      const displayName = user.names?.international ?? user.id;
+      const profileCard = speedrunProfileCard(user, user.id);
+      const displayName = profileCard.displayName;
       const token = crypto.randomUUID();
       const now = new Date().toISOString();
       const expiresAt = new Date(Date.now() + 90 * 86400000).toISOString();
       await env.DB.batch([
-        env.DB.prepare(`INSERT INTO profiles (speedrun_user_id, display_name, linked_at) VALUES (?, ?, ?) ON CONFLICT(speedrun_user_id) DO UPDATE SET display_name = excluded.display_name, linked_at = excluded.linked_at`).bind(user.id, displayName, now),
+        env.DB.prepare(`INSERT INTO profiles
+          (speedrun_user_id, display_name, avatar_url, country_code, linked_at)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(speedrun_user_id) DO UPDATE SET
+            display_name = excluded.display_name,
+            avatar_url = excluded.avatar_url,
+            country_code = excluded.country_code,
+            linked_at = excluded.linked_at`)
+          .bind(user.id, displayName, profileCard.avatarUrl || null,
+                profileCard.countryCode || null, now),
         env.DB.prepare(`DELETE FROM sessions WHERE expires_at <= ?`).bind(now),
         env.DB.prepare(`INSERT INTO sessions (token_hash, speedrun_user_id, created_at, expires_at) VALUES (?, ?, ?, ?)`).bind(await hash(token), user.id, now, expiresAt)
       ]);
@@ -297,8 +390,7 @@ export default {
       if (!session) return json({ error: "Link your Speedrun.com account before matchmaking." }, 401);
       if (queueType !== "random" && queueType !== "ruleset") return json({ error: "Invalid queue type." }, 400);
       if (queueType === "ruleset" && (!CATEGORIES.includes(category) || !SUBCATEGORIES.includes(subcategory))) return json({ error: "Choose a valid category and subcategory." }, 400);
-      if (queueType === "ruleset" && !LEVELS.includes(level)) return json({ error: "Choose a valid level." }, 400);
-      const key = queueKey(queueType, level, category, subcategory);
+      const key = queueKey(queueType, category, subcategory);
       await env.DB.prepare(`DELETE FROM queue_entries WHERE player_id = ?`).bind(playerId).run();
       const waiting = await env.DB.prepare(`SELECT * FROM queue_entries WHERE queue_key = ?`).bind(key).first();
       if (!waiting) {
@@ -308,14 +400,65 @@ export default {
       }
       if (waiting.player_id === playerId) return json({ status: "waiting", message: "You are already waiting in this queue." });
       const createdAtUtc = new Date().toISOString();
-      const match = { id: crypto.randomUUID(), players: [{ playerId: waiting.player_id, speedrunUserId: waiting.speedrun_user_id }, { playerId, speedrunUserId: session.speedrun_user_id }], level: queueType === "random" ? randomItem(LEVELS) : level, category: queueType === "random" ? randomItem(CATEGORIES) : category, subcategory: queueType === "random" ? randomItem(SUBCATEGORIES) : subcategory, difficulty: "Easy", createdAtUtc };
+      const match = { id: crypto.randomUUID(), phase: "proposal", proposalExpiresAtUtc: new Date(Date.now() + MATCH_ACCEPT_TIMEOUT_MS).toISOString(), acceptedPlayerIds: [], players: [{ playerId: waiting.player_id, speedrunUserId: waiting.speedrun_user_id }, { playerId, speedrunUserId: session.speedrun_user_id }], level: randomItem(LEVELS), category: queueType === "random" ? randomItem(CATEGORIES) : category, subcategory: queueType === "random" ? randomItem(SUBCATEGORIES) : subcategory, difficulty: "Easy", createdAtUtc };
       const matchJson = JSON.stringify(match);
       await env.DB.batch([
         env.DB.prepare(`DELETE FROM queue_entries WHERE queue_key = ?`).bind(key),
         env.DB.prepare(`INSERT OR REPLACE INTO matches (player_id, match_json, created_at) VALUES (?, ?, ?)`).bind(waiting.player_id, matchJson, createdAtUtc),
         env.DB.prepare(`INSERT OR REPLACE INTO matches (player_id, match_json, created_at) VALUES (?, ?, ?)`).bind(playerId, matchJson, createdAtUtc)
       ]);
-      return json({ status: "matched", match });
+      return json({ status: "proposal", proposalExpiresAtUtc: match.proposalExpiresAtUtc });
+    }
+
+    if (request.method === "POST"
+        && url.pathname.startsWith("/matches/")
+        && url.pathname.endsWith("/proposal")) {
+      const playerId = decodeURIComponent(
+        url.pathname.slice("/matches/".length, -"/proposal".length)
+      );
+      const data = await body(request);
+      const session = await sessionFor(env, data?.sessionToken);
+      const decision = data?.decision;
+      if (!session) return json({ error: "Link your Speedrun.com account before responding to a match." }, 401);
+      if (decision !== "accept" && decision !== "decline") return json({ error: "Choose accept or decline." }, 400);
+      const stored = await env.DB.prepare(`SELECT match_json FROM matches WHERE player_id = ?`)
+        .bind(playerId).first();
+      if (!stored) return json({ status: "none" });
+      const match = JSON.parse(stored.match_json);
+      const isParticipant = match.players?.some((player) =>
+        player.playerId === playerId && player.speedrunUserId === session.speedrun_user_id
+      );
+      if (!isParticipant) return json({ error: "This offer does not belong to your account." }, 403);
+      if (match.phase !== "proposal") {
+        return json({ status: "matched", match: await matchForClient(env, match) });
+      }
+      if (Date.parse(match.proposalExpiresAtUtc) <= Date.now()) {
+        await deleteMatchState(env, match);
+        return json({ status: "expired" });
+      }
+      if (decision === "decline") {
+        await deleteMatchState(env, match);
+        return json({ status: "declined" });
+      }
+
+      const accepted = new Set(match.acceptedPlayerIds ?? []);
+      accepted.add(playerId);
+      match.acceptedPlayerIds = [...accepted];
+      const bothAccepted = match.players.every((player) => accepted.has(player.playerId));
+      if (bothAccepted) {
+        match.phase = "matched";
+        match.acceptedAtUtc = new Date().toISOString();
+        delete match.proposalExpiresAtUtc;
+        delete match.acceptedPlayerIds;
+      }
+      const matchJson = JSON.stringify(match);
+      await env.DB.batch(match.players.map((player) =>
+        env.DB.prepare(`UPDATE matches SET match_json = ? WHERE player_id = ?`)
+          .bind(matchJson, player.playerId)
+      ));
+      return bothAccepted
+        ? json({ status: "matched", match: await matchForClient(env, match) })
+        : json({ status: "accepted", proposalExpiresAtUtc: match.proposalExpiresAtUtc });
     }
 
     if (request.method === "POST"
@@ -348,6 +491,9 @@ export default {
         player.playerId === playerId && player.speedrunUserId === session.speedrun_user_id
       );
       if (!isParticipant) return json({ error: "This status does not belong to your active match." }, 403);
+      if (match.phase === "proposal") {
+        return json({ error: "Both players must accept the match first." }, 409);
+      }
 
       const nowMilliseconds = Date.now();
       const now = new Date(nowMilliseconds).toISOString();
@@ -684,11 +830,23 @@ export default {
       const result = await env.DB.prepare(`SELECT match_json FROM matches WHERE player_id = ?`).bind(playerId).first();
       if (!result) return json({ status: "none" });
       const match = JSON.parse(result.match_json);
+      if (match.phase === "proposal") {
+        if (Date.parse(match.proposalExpiresAtUtc) <= Date.now()) {
+          await deleteMatchState(env, match);
+          return json({ status: "expired" });
+        }
+        return json({
+          status: "proposal",
+          proposalExpiresAtUtc: match.proposalExpiresAtUtc,
+          acceptedPlayerIds: match.acceptedPlayerIds ?? []
+        });
+      }
       const raceState = await resolveExpiredFinishWindow(env, match.id);
       const outcome = raceState.outcome;
+      const clientMatch = await matchForClient(env, match);
       return outcome
-        ? json({ status: "completed", match, winnerPlayerId: outcome.winner_player_id, decidedAtUtc: outcome.decided_at_utc })
-        : json({ status: "matched", match });
+        ? json({ status: "completed", match: clientMatch, winnerPlayerId: outcome.winner_player_id, decidedAtUtc: outcome.decided_at_utc })
+        : json({ status: "matched", match: clientMatch });
     }
     return json({ error: "Not found." }, 404);
   }

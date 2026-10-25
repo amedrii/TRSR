@@ -26,8 +26,11 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QPainter>
+#include <QPainterPath>
 #include <QPushButton>
 #include <QProcess>
+#include <QPixmap>
 #include <QSettings>
 #include <QStringList>
 
@@ -39,7 +42,72 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <algorithm>
 #include <cmath>
+#include <initializer_list>
+#include <thread>
+#include <utility>
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+enum class ClientNotification
+{
+    MatchFound,
+    Victory,
+    Defeat
+};
+
+static void playClientNotification(ClientNotification notification)
+{
+    // Original short "bronze chime" patterns. They do not reuse TRA audio.
+    std::thread([notification]() {
+        const std::initializer_list<std::pair<DWORD, DWORD>> tones =
+            notification == ClientNotification::MatchFound
+                ? std::initializer_list<std::pair<DWORD, DWORD>>{{392, 80}, {523, 80}, {659, 140}}
+                : notification == ClientNotification::Victory
+                    ? std::initializer_list<std::pair<DWORD, DWORD>>{{523, 80}, {659, 80}, {784, 80}, {1047, 180}}
+                    : std::initializer_list<std::pair<DWORD, DWORD>>{{494, 120}, {392, 120}, {294, 180}};
+        for (const auto &[frequency, duration] : tones) {
+            Beep(frequency, duration);
+        }
+    }).detach();
+}
+
+static void bringMatchWindowToFront(QMainWindow &window)
+{
+    if (window.isMinimized()) {
+        window.showNormal();
+    }
+    window.raise();
+    window.activateWindow();
+
+    FLASHWINFO flashInfo{};
+    flashInfo.cbSize = sizeof(flashInfo);
+    flashInfo.hwnd = reinterpret_cast<HWND>(window.winId());
+    flashInfo.dwFlags = FLASHW_ALL | FLASHW_TIMERNOFG;
+    flashInfo.uCount = 3;
+    flashInfo.dwTimeout = 0;
+    FlashWindowEx(&flashInfo);
+    SetForegroundWindow(flashInfo.hwnd);
+}
+
+static QString countryFlagEmoji(const QString &countryCode)
+{
+    const QString code = countryCode.trimmed().toUpper();
+    if (code.size() != 2 || !code.at(0).isLetter() || !code.at(1).isLetter()) {
+        return {};
+    }
+
+    const uint first = 0x1F1E6u + code.at(0).unicode() - u'A';
+    const uint second = 0x1F1E6u + code.at(1).unicode() - u'A';
+    QString flag;
+    flag.append(QChar::highSurrogate(first));
+    flag.append(QChar::lowSurrogate(first));
+    flag.append(QChar::highSurrogate(second));
+    flag.append(QChar::lowSurrogate(second));
+    return flag;
+}
 
 int runTrasrApplication(QApplication &app)
 {
@@ -228,6 +296,13 @@ int runTrasrApplication(QApplication &app)
         );
     forfeitButton->setEnabled(false);
 
+    auto *acceptMatchButton = new QPushButton(QStringLiteral("Accept match"));
+    acceptMatchButton->setObjectName(QStringLiteral("primaryButton"));
+    acceptMatchButton->hide();
+    auto *declineMatchButton = new QPushButton(QStringLiteral("Decline"));
+    declineMatchButton->setObjectName(QStringLiteral("dangerButton"));
+    declineMatchButton->hide();
+
     // UI only for now; queue joining is the next matchmaking step.
     auto *randomQueueButton = new QPushButton(
         QStringLiteral("Join random queue")
@@ -342,6 +417,61 @@ int runTrasrApplication(QApplication &app)
     matchLayout->setContentsMargins(4, 14, 4, 4);
     matchLayout->setSpacing(12);
 
+    auto *versusPanel = new QFrame;
+    versusPanel->setObjectName(QStringLiteral("versusPanel"));
+    auto *versusLayout = new QHBoxLayout(versusPanel);
+    versusLayout->setContentsMargins(16, 12, 16, 12);
+    versusLayout->setSpacing(14);
+
+    auto *localPlayerCard = new QWidget;
+    auto *localPlayerLayout = new QVBoxLayout(localPlayerCard);
+    localPlayerLayout->setContentsMargins(0, 0, 0, 0);
+    localPlayerLayout->setSpacing(5);
+    auto *localPlayerCaption = new QLabel(QStringLiteral("YOU"));
+    localPlayerCaption->setObjectName(QStringLiteral("playerCaption"));
+    localPlayerCaption->setAlignment(Qt::AlignCenter);
+    auto *localPlayerAvatar = new QLabel(QStringLiteral("?"));
+    localPlayerAvatar->setObjectName(QStringLiteral("playerAvatar"));
+    localPlayerAvatar->setAlignment(Qt::AlignCenter);
+    localPlayerAvatar->setFixedSize(64, 64);
+    auto *localPlayerName = new QLabel;
+    localPlayerName->setObjectName(QStringLiteral("playerName"));
+    localPlayerName->setTextFormat(Qt::PlainText);
+    localPlayerName->setAlignment(Qt::AlignCenter);
+    localPlayerName->setWordWrap(true);
+    localPlayerLayout->addWidget(localPlayerCaption);
+    localPlayerLayout->addWidget(localPlayerAvatar, 0, Qt::AlignCenter);
+    localPlayerLayout->addWidget(localPlayerName);
+
+    auto *versusLabel = new QLabel(QStringLiteral("VS"));
+    versusLabel->setObjectName(QStringLiteral("versusLabel"));
+    versusLabel->setAlignment(Qt::AlignCenter);
+
+    auto *opponentPlayerCard = new QWidget;
+    auto *opponentPlayerLayout = new QVBoxLayout(opponentPlayerCard);
+    opponentPlayerLayout->setContentsMargins(0, 0, 0, 0);
+    opponentPlayerLayout->setSpacing(5);
+    auto *opponentPlayerCaption = new QLabel(QStringLiteral("OPPONENT"));
+    opponentPlayerCaption->setObjectName(QStringLiteral("playerCaption"));
+    opponentPlayerCaption->setAlignment(Qt::AlignCenter);
+    auto *opponentPlayerAvatar = new QLabel(QStringLiteral("?"));
+    opponentPlayerAvatar->setObjectName(QStringLiteral("playerAvatar"));
+    opponentPlayerAvatar->setAlignment(Qt::AlignCenter);
+    opponentPlayerAvatar->setFixedSize(64, 64);
+    auto *opponentPlayerName = new QLabel;
+    opponentPlayerName->setObjectName(QStringLiteral("playerName"));
+    opponentPlayerName->setTextFormat(Qt::PlainText);
+    opponentPlayerName->setAlignment(Qt::AlignCenter);
+    opponentPlayerName->setWordWrap(true);
+    opponentPlayerLayout->addWidget(opponentPlayerCaption);
+    opponentPlayerLayout->addWidget(opponentPlayerAvatar, 0, Qt::AlignCenter);
+    opponentPlayerLayout->addWidget(opponentPlayerName);
+
+    versusLayout->addWidget(localPlayerCard, 1);
+    versusLayout->addWidget(versusLabel);
+    versusLayout->addWidget(opponentPlayerCard, 1);
+    versusPanel->hide();
+
     auto *matchBox = new QGroupBox(QStringLiteral("Match status"));
     auto *matchBoxLayout = new QVBoxLayout(matchBox);
     matchBoxLayout->setSpacing(10);
@@ -351,6 +481,10 @@ int runTrasrApplication(QApplication &app)
     opponentStatus->setWordWrap(true);
     matchBoxLayout->addWidget(queueStatus);
     matchBoxLayout->addWidget(opponentStatus);
+    auto *proposalButtons = new QHBoxLayout;
+    proposalButtons->addWidget(acceptMatchButton, 2);
+    proposalButtons->addWidget(declineMatchButton, 1);
+    matchBoxLayout->addLayout(proposalButtons);
     matchBoxLayout->addWidget(autoStartStatus);
     matchBoxLayout->addWidget(readyButton);
 
@@ -364,6 +498,7 @@ int runTrasrApplication(QApplication &app)
     serverStatus->setObjectName(QStringLiteral("connectionStatus"));
     connectionLayout->addWidget(serverStatus);
 
+    matchLayout->addWidget(versusPanel);
     matchLayout->addWidget(matchBox);
     matchLayout->addWidget(connectionBox);
     matchLayout->addStretch(1);
@@ -513,6 +648,11 @@ int runTrasrApplication(QApplication &app)
         QGroupBox { color: #d7b86a; font-weight: 600; border: 1px solid #3b362b; border-radius: 7px; margin-top: 10px; padding: 13px 12px 12px 12px; }
         QGroupBox::title { subcontrol-origin: margin; left: 11px; padding: 0 5px; }
         QLabel { color: #ece4cf; }
+        QFrame#versusPanel { background: #1b1a18; border: 1px solid #51452e; border-radius: 8px; }
+        QLabel#playerCaption { color: #a49a85; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+        QLabel#playerAvatar { background: #2b2822; border: 1px solid #806a38; border-radius: 32px; color: #d7b86a; font-family: "Georgia"; font-size: 24px; font-weight: 700; }
+        QLabel#playerName { color: #f0e7d0; font-weight: 700; }
+        QLabel#versusLabel { color: #d7b86a; font-family: "Georgia"; font-size: 22px; font-weight: 700; }
         QLabel#queueStatus, QLabel#opponentStatus, QLabel#connectionStatus, QLabel#verifierStatus { color: #b7ae9b; }
         QLabel#runStatus { color: #f0e7d0; font-size: 17px; font-weight: 700; padding: 12px 4px; }
         QLabel#resultTitle { color: #d7b86a; font-family: "Georgia"; font-size: 28px; font-weight: 700; padding: 12px 4px 2px 4px; }
@@ -531,6 +671,77 @@ int runTrasrApplication(QApplication &app)
 
     // Local development health check for the Node matchmaking server.
     auto *networkManager = new QNetworkAccessManager(&window);
+
+    auto setPlayerAvatar = [networkManager](QLabel *avatar, const QString &avatarUrl) {
+        avatar->setProperty("avatarUrl", avatarUrl);
+        avatar->setPixmap(QPixmap());
+        avatar->setText(QStringLiteral("?"));
+        if (avatarUrl.isEmpty()) {
+            return;
+        }
+
+        auto *reply = networkManager->get(QNetworkRequest(QUrl(avatarUrl)));
+        QObject::connect(reply, &QNetworkReply::finished, [reply, avatar, avatarUrl]() {
+            const QByteArray bytes = reply->readAll();
+            QPixmap source;
+            if (reply->error() == QNetworkReply::NoError
+                && avatar->property("avatarUrl").toString() == avatarUrl
+                && source.loadFromData(bytes)) {
+                const QSize size = avatar->size();
+                const QPixmap scaled = source.scaled(
+                    size, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+                QPixmap circular(size);
+                circular.fill(Qt::transparent);
+                QPainter painter(&circular);
+                painter.setRenderHint(QPainter::Antialiasing);
+                QPainterPath mask;
+                mask.addEllipse(circular.rect());
+                painter.setClipPath(mask);
+                painter.drawPixmap((size.width() - scaled.width()) / 2,
+                                   (size.height() - scaled.height()) / 2, scaled);
+                avatar->setText({});
+                avatar->setPixmap(circular);
+            }
+            reply->deleteLater();
+        });
+    };
+
+    auto hideMatchPlayers = [versusPanel]() {
+        versusPanel->hide();
+    };
+    auto showMatchPlayers =
+        [playerId, versusPanel, localPlayerAvatar, localPlayerName,
+         opponentPlayerAvatar, opponentPlayerName, setPlayerAvatar](const QJsonArray &players) {
+            QJsonObject localPlayer;
+            QJsonObject opponentPlayer;
+            for (const QJsonValue &value : players) {
+                const QJsonObject player = value.toObject();
+                if (player.value(QStringLiteral("playerId")).toString() == playerId) {
+                    localPlayer = player;
+                } else {
+                    opponentPlayer = player;
+                }
+            }
+            if (localPlayer.isEmpty() || opponentPlayer.isEmpty()) {
+                versusPanel->hide();
+                return;
+            }
+
+            const auto populateCard = [setPlayerAvatar](const QJsonObject &player,
+                                                        QLabel *avatar, QLabel *name) {
+                const QJsonObject profile = player.value(QStringLiteral("profile")).toObject();
+                const QString displayName = profile.value(QStringLiteral("displayName")).toString(
+                    player.value(QStringLiteral("speedrunUserId")).toString());
+                const QString flag = countryFlagEmoji(
+                    profile.value(QStringLiteral("countryCode")).toString());
+                name->setText(flag.isEmpty() ? displayName : flag + QStringLiteral(" ") + displayName);
+                setPlayerAvatar(avatar, profile.value(QStringLiteral("avatarUrl")).toString());
+            };
+
+            populateCard(localPlayer, localPlayerAvatar, localPlayerName);
+            populateCard(opponentPlayer, opponentPlayerAvatar, opponentPlayerName);
+            versusPanel->show();
+        };
 
     auto refreshAdminOverview = [networkManager, adminStatus, refreshAdminButton]() {
         QSettings settings;
@@ -741,6 +952,8 @@ int runTrasrApplication(QApplication &app)
     // A staging exit is a no-contest. Once either player enters the level,
     // the same control becomes a normal forfeit.
     auto matchStarted = std::make_shared<bool>(false);
+    auto proposalNotified = std::make_shared<bool>(false);
+    auto proposalAccepted = std::make_shared<bool>(false);
     auto latestPresence = std::make_shared<RunPresence>();
     auto autoStartPresence = std::make_shared<QString>();
     auto autoStartNavigationScheduled = std::make_shared<bool>(false);
@@ -749,6 +962,77 @@ int runTrasrApplication(QApplication &app)
     auto *menuNavigator = new QProcess(&window);
     menuNavigator->setProcessChannelMode(QProcess::SeparateChannels);
     matchPollTimer->setInterval(1000);
+
+    auto respondToMatchProposal =
+        [networkManager, playerId, hasActiveMatch, proposalAccepted, proposalNotified,
+         acceptMatchButton, declineMatchButton, queueStatus, opponentStatus,
+         matchPollTimer, setQueueUiState, showQueueScreen, hideMatchPlayers](const QString &decision) {
+            QSettings settings;
+            const QString sessionToken = settings.value(
+                QStringLiteral("matchmaking/sessionToken")).toString();
+            if (sessionToken.isEmpty()) {
+                queueStatus->setText(QStringLiteral("Match offer failed: login required"));
+                return;
+            }
+            acceptMatchButton->setEnabled(false);
+            declineMatchButton->setEnabled(false);
+            const QJsonObject body{
+                {QStringLiteral("sessionToken"), sessionToken},
+                {QStringLiteral("decision"), decision}
+            };
+            QNetworkRequest request(QUrl(
+                QStringLiteral("https://api.trsr.app/matches/") + playerId
+                + QStringLiteral("/proposal")));
+            request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+            auto *reply = networkManager->post(
+                request, QJsonDocument(body).toJson(QJsonDocument::Compact));
+            QObject::connect(reply, &QNetworkReply::finished,
+                             [reply, decision, hasActiveMatch, proposalAccepted, proposalNotified,
+                              acceptMatchButton, declineMatchButton, queueStatus, opponentStatus,
+                              matchPollTimer, setQueueUiState, showQueueScreen,
+                              hideMatchPlayers]() {
+                const QJsonObject response = QJsonDocument::fromJson(reply->readAll()).object();
+                if (reply->error() != QNetworkReply::NoError) {
+                    const QString error = response.value(QStringLiteral("error")).toString();
+                    queueStatus->setText(error.isEmpty()
+                                             ? QStringLiteral("Match offer request failed")
+                                             : QStringLiteral("Match offer: %1").arg(error));
+                    acceptMatchButton->setEnabled(true);
+                    declineMatchButton->setEnabled(true);
+                    reply->deleteLater();
+                    return;
+                }
+                const QString status = response.value(QStringLiteral("status")).toString();
+                if (decision == QStringLiteral("accept")
+                    && (status == QStringLiteral("accepted") || status == QStringLiteral("matched"))) {
+                    *proposalAccepted = true;
+                    queueStatus->setText(status == QStringLiteral("matched")
+                                             ? QStringLiteral("Match accepted — revealing ruleset…")
+                                             : QStringLiteral("Match accepted — waiting for opponent"));
+                    opponentStatus->setText(QStringLiteral("Opponent: deciding"));
+                    reply->deleteLater();
+                    return;
+                }
+                *hasActiveMatch = false;
+                *proposalAccepted = false;
+                *proposalNotified = false;
+                acceptMatchButton->hide();
+                declineMatchButton->hide();
+                hideMatchPlayers();
+                matchPollTimer->stop();
+                setQueueUiState(true, false, true);
+                queueStatus->setText(status == QStringLiteral("expired")
+                                         ? QStringLiteral("Match offer expired")
+                                         : QStringLiteral("Match offer declined"));
+                showQueueScreen();
+                reply->deleteLater();
+            });
+        };
+
+    QObject::connect(acceptMatchButton, &QPushButton::clicked, &window,
+                     [respondToMatchProposal]() { respondToMatchProposal(QStringLiteral("accept")); });
+    QObject::connect(declineMatchButton, &QPushButton::clicked, &window,
+                     [respondToMatchProposal]() { respondToMatchProposal(QStringLiteral("decline")); });
 
     auto *healthReply = networkManager->get(
         QNetworkRequest(
@@ -1157,7 +1441,7 @@ int runTrasrApplication(QApplication &app)
          autoStartPresence, autoStartNavigationScheduled, autoStartLaunchScheduled,
          autoStartAwaitingRun, matchPresenceTimer, queueStatus, setQueueUiState,
          levelSelector, categorySelector, subcategorySelector, resultTitle, resultRuleset,
-         resultDetail, showResultsScreen, showQueueScreen]() {
+         resultDetail, showResultsScreen, showQueueScreen, &window]() {
             if (!*hasActiveMatch) {
                 return;
             }
@@ -1211,7 +1495,7 @@ int runTrasrApplication(QApplication &app)
                  latestPresence, autoStartAwaitingRun, hasActiveMatch, matchStarted, matchPresenceTimer,
                  readyButton, forfeitButton, queueStatus, setQueueUiState, levelSelector,
                  categorySelector, subcategorySelector, resultTitle, resultRuleset,
-                 resultDetail, showResultsScreen, showQueueScreen]() {
+                 resultDetail, showResultsScreen, showQueueScreen, &window]() {
                     if (!*hasActiveMatch) {
                         reply->deleteLater();
                         return;
@@ -1276,6 +1560,9 @@ int runTrasrApplication(QApplication &app)
                         forfeitButton->setEnabled(false);
                         setQueueUiState(true, false, true);
                         const bool won = winnerPlayerId == playerId;
+                        playClientNotification(won ? ClientNotification::Victory
+                                                   : ClientNotification::Defeat);
+                        bringMatchWindowToFront(window);
                         opponentStatus->setText(
                             won ? QStringLiteral("Result: You win")
                                 : QStringLiteral("Result: Opponent wins"));
@@ -1405,27 +1692,87 @@ int runTrasrApplication(QApplication &app)
         matchPollTimer,
         &QTimer::timeout,
         &window,
-        [networkManager, matchPollTimer, matchPresenceTimer, queueStatus, setQueueUiState,
-         levelSelector, categorySelector, subcategorySelector, playerId, hasActiveMatch, matchStarted]() {
+        [networkManager, matchPollTimer, matchPresenceTimer, queueStatus, opponentStatus,
+         acceptMatchButton, declineMatchButton, setQueueUiState, levelSelector,
+         categorySelector, subcategorySelector, playerId, hasActiveMatch, matchStarted,
+         proposalNotified, proposalAccepted, showQueueScreen, showMatchPlayers,
+         hideMatchPlayers, &window]() {
             auto *reply = networkManager->get(QNetworkRequest(QUrl(
                 QStringLiteral("https://api.trsr.app/matches/") + playerId)));
             QObject::connect(
                 reply, &QNetworkReply::finished,
-                [reply, matchPollTimer, matchPresenceTimer, queueStatus, setQueueUiState,
-                 levelSelector, categorySelector, subcategorySelector, hasActiveMatch, matchStarted]() {
+                [reply, matchPollTimer, matchPresenceTimer, queueStatus, opponentStatus,
+                 acceptMatchButton, declineMatchButton, setQueueUiState, levelSelector,
+                 categorySelector, subcategorySelector, playerId, hasActiveMatch, matchStarted,
+                 proposalNotified, proposalAccepted, showQueueScreen, showMatchPlayers,
+                 hideMatchPlayers, &window]() {
                     if (reply->error() != QNetworkReply::NoError) {
                         reply->deleteLater();
                         return;
                     }
                     const QJsonObject response =
                         QJsonDocument::fromJson(reply->readAll()).object();
-                    if (response.value(QStringLiteral("status")).toString()
-                        != QStringLiteral("matched")) {
+                    const QString responseStatus = response.value(QStringLiteral("status")).toString();
+                    if (responseStatus == QStringLiteral("proposal")) {
+                        *hasActiveMatch = false;
+                        matchPresenceTimer->stop();
+                        hideMatchPlayers();
+                        const QJsonArray acceptedPlayers = response.value(
+                            QStringLiteral("acceptedPlayerIds")).toArray();
+                        const bool youAccepted = std::any_of(
+                            acceptedPlayers.cbegin(), acceptedPlayers.cend(),
+                            [&playerId](const QJsonValue &value) {
+                                return value.toString() == playerId;
+                            });
+                        *proposalAccepted = youAccepted;
+                        acceptMatchButton->setVisible(true);
+                        declineMatchButton->setVisible(true);
+                        acceptMatchButton->setEnabled(!youAccepted);
+                        declineMatchButton->setEnabled(!youAccepted);
+                        if (!*proposalNotified) {
+                            *proposalNotified = true;
+                            playClientNotification(ClientNotification::MatchFound);
+                            bringMatchWindowToFront(window);
+                        }
+                        const QDateTime expiresAt = QDateTime::fromString(
+                            response.value(QStringLiteral("proposalExpiresAtUtc")).toString(),
+                            Qt::ISODateWithMs);
+                        const int secondsLeft = expiresAt.isValid()
+                            ? std::max(0, static_cast<int>(
+                                  (QDateTime::currentDateTimeUtc().msecsTo(expiresAt) + 999) / 1000))
+                            : 0;
+                        queueStatus->setText(youAccepted
+                            ? QStringLiteral("Match accepted — waiting for opponent (%1 seconds)")
+                                  .arg(secondsLeft)
+                            : QStringLiteral("Match found — accept within %1 seconds")
+                                  .arg(secondsLeft));
+                        opponentStatus->setText(youAccepted
+                            ? QStringLiteral("Opponent: deciding")
+                            : QStringLiteral("Opponent: match offer pending"));
+                        setQueueUiState(false, false, false);
+                        reply->deleteLater();
+                        return;
+                    }
+                    if (responseStatus != QStringLiteral("matched")) {
+                        if (*proposalNotified) {
+                            *proposalNotified = false;
+                            *proposalAccepted = false;
+                            acceptMatchButton->hide();
+                            declineMatchButton->hide();
+                            hideMatchPlayers();
+                            matchPollTimer->stop();
+                            setQueueUiState(true, false, true);
+                            queueStatus->setText(responseStatus == QStringLiteral("expired")
+                                ? QStringLiteral("Match offer expired")
+                                : QStringLiteral("Match offer no longer available"));
+                            showQueueScreen();
+                        }
                         reply->deleteLater();
                         return;
                     }
                     const QJsonObject match =
                         response.value(QStringLiteral("match")).toObject();
+                    showMatchPlayers(match.value(QStringLiteral("players")).toArray());
                     levelSelector->setCurrentText(match.value(QStringLiteral("level")).toString());
                     categorySelector->setCurrentText(match.value(QStringLiteral("category")).toString());
                     subcategorySelector->setCurrentText(match.value(QStringLiteral("subcategory")).toString());
@@ -1437,6 +1784,10 @@ int runTrasrApplication(QApplication &app)
                     matchPollTimer->stop();
                     *hasActiveMatch = true;
                     *matchStarted = false;
+                    *proposalNotified = false;
+                    *proposalAccepted = false;
+                    acceptMatchButton->hide();
+                    declineMatchButton->hide();
                     matchPresenceTimer->start();
                     setQueueUiState(false, false, false);
                     reply->deleteLater();
@@ -1482,7 +1833,7 @@ int runTrasrApplication(QApplication &app)
         randomQueueButton, &QPushButton::clicked, &window,
         [networkManager, queueStatus, setQueueUiState, levelSelector,
          categorySelector, subcategorySelector, matchPollTimer, matchPresenceTimer,
-         playerId, hasActiveMatch, matchStarted]() {
+         playerId, hasActiveMatch, matchStarted, hideMatchPlayers]() {
             QSettings settings;
             const QString sessionToken = settings.value(
                                                      QStringLiteral("matchmaking/sessionToken")).toString();
@@ -1491,6 +1842,7 @@ int runTrasrApplication(QApplication &app)
                 return;
             }
             setQueueUiState(false, false, false);
+            hideMatchPlayers();
             queueStatus->setText(QStringLiteral("Matchmaking: joining random queue..."));
             const QJsonObject requestBody{
                 {QStringLiteral("playerId"), playerId},
@@ -1517,6 +1869,10 @@ int runTrasrApplication(QApplication &app)
                     if (responseStatus == QStringLiteral("waiting")) {
                         queueStatus->setText(QStringLiteral("Matchmaking: waiting for opponent"));
                         setQueueUiState(false, true, false);
+                        matchPollTimer->start();
+                    } else if (responseStatus == QStringLiteral("proposal")) {
+                        queueStatus->setText(QStringLiteral("Match found — checking offer..."));
+                        setQueueUiState(false, false, false);
                         matchPollTimer->start();
                     } else if (responseStatus == QStringLiteral("matched")) {
                         const QJsonObject match = response.value(QStringLiteral("match")).toObject();
@@ -1546,7 +1902,7 @@ int runTrasrApplication(QApplication &app)
         rulesetQueueButton, &QPushButton::clicked, &window,
         [networkManager, queueStatus, setQueueUiState, levelSelector,
          categorySelector, subcategorySelector, matchPollTimer, matchPresenceTimer,
-         playerId, hasActiveMatch, matchStarted]() {
+         playerId, hasActiveMatch, matchStarted, hideMatchPlayers]() {
             QSettings settings;
             const QString sessionToken = settings.value(
                                                      QStringLiteral("matchmaking/sessionToken")).toString();
@@ -1555,6 +1911,7 @@ int runTrasrApplication(QApplication &app)
                 return;
             }
             setQueueUiState(false, false, false);
+            hideMatchPlayers();
             queueStatus->setText(
                 QStringLiteral("Matchmaking: joining selected ruleset queue..."));
             const QJsonObject requestBody{
@@ -1586,6 +1943,10 @@ int runTrasrApplication(QApplication &app)
                         queueStatus->setText(
                             QStringLiteral("Matchmaking: waiting for ruleset opponent"));
                         setQueueUiState(false, true, false);
+                        matchPollTimer->start();
+                    } else if (responseStatus == QStringLiteral("proposal")) {
+                        queueStatus->setText(QStringLiteral("Match found — checking offer..."));
+                        setQueueUiState(false, false, false);
                         matchPollTimer->start();
                     } else if (responseStatus == QStringLiteral("matched")) {
                         const QJsonObject match = response.value(QStringLiteral("match")).toObject();
@@ -1637,8 +1998,8 @@ int runTrasrApplication(QApplication &app)
         }
         );
 
-    // Poll ten times per second. IGT updates in whole seconds, but faster polling
-    // helps distinguish normal play from pauses and loading transitions.
+    // Ranked RTA starts and resumes on observed game frames. A precise 60 Hz
+    // monitor bounds external read-only timing uncertainty to roughly one frame.
     auto runMonitor = std::make_shared<RunMonitor>();
     auto updateStatus =
         [status, levelSelector, categorySelector, subcategorySelector, submitOnlineResult,
@@ -1669,6 +2030,7 @@ int runTrasrApplication(QApplication &app)
             }
         };
     QTimer timer;
+    timer.setTimerType(Qt::PreciseTimer);
     QObject::connect(&timer, &QTimer::timeout, &window, updateStatus);
 
     loginDialog.resize(380, 180);
@@ -1685,7 +2047,7 @@ int runTrasrApplication(QApplication &app)
         );
 
     restartScreenDetector(levelSelector->currentText());
-    timer.start(100);
+    timer.start(16);
     updateStatus();
 
     window.resize(440, 480);

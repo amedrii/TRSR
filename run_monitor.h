@@ -1,6 +1,7 @@
 #pragma once
 
 #include "attempt_log.h"
+#include "no_load_rta_timer.h"
 #include "screen_completion.h"
 
 #include <QString>
@@ -19,6 +20,7 @@ struct RunPresence
 {
     QString state = QStringLiteral("waiting");
     float igtSeconds = -1.0f;
+    float rtaNoLoadSeconds = -1.0f;
 };
 
 class RunMonitor
@@ -30,13 +32,12 @@ public:
 
 private:
     float m_previousGameTime = -1.0f;
-    float m_previousLevelCount = -1.0f;
     int m_unchangedPolls = 0;
     QString m_activeSelectionKey;
     bool m_levelVerifiedThisRun = false;
-    bool m_finishArmed = false;
     bool m_finishHandled = false;
     QString m_finishMessage;
+    NoLoadRtaTimer m_noLoadRtaTimer;
     ScreenCompletionReader m_screenCompletionReader;
     std::optional<AttemptRecord> m_savedAttempt;
     RunPresence m_presence;

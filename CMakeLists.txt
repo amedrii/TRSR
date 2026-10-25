@@ -11,12 +11,14 @@ qt_standard_project_setup()
 
 qt_add_executable(TRASR
     main.cpp
+    no_load_rta_timer.cpp
     tra_process.cpp
     run_rules.cpp
     trasr_window.cpp
     run_monitor.cpp
     screen_completion.cpp
     run_monitor.h
+    no_load_rta_timer.h
     screen_completion.h
     trasr_window.h
     tra_process.h

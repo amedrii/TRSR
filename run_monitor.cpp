@@ -4,16 +4,15 @@
 #include "run_rules.h"
 #include "tra_process.h"
 
-#include <cmath>
 // Save a verified completed attempt locally until results are submitted to the
 // matchmaking service.
 static bool saveCompletedAttempt(
     const QString &level, const QString &category, const QString &subcategory,
-    float igt, const QString &buildHash, QString *error
+    float igt, float rtaNoLoad, const QString &buildHash, QString *error
     )
 {
     return appendAttempt(
-        AttemptRecord{level, category, subcategory, igt, buildHash}, error
+        AttemptRecord{level, category, subcategory, igt, rtaNoLoad, buildHash}, error
         );
 }
 
@@ -35,13 +34,12 @@ QString RunMonitor::update(const RunSelection &selection)
 
             if (!process.has_value()) {
                 m_previousGameTime = -1.0f;
-                m_previousLevelCount = -1.0f;
                 m_unchangedPolls = 0;
                 m_levelVerifiedThisRun = false;
-                m_finishArmed = false;
                 m_finishHandled = false;
                 m_finishMessage.clear();
-                m_presence = RunPresence{QStringLiteral("waiting"), -1.0f};
+                m_noLoadRtaTimer.reset();
+                m_presence = RunPresence{QStringLiteral("waiting"), -1.0f, -1.0f};
 
                 return QStringLiteral("Tomb Raider: Anniversary\nnot running");
             }
@@ -69,10 +67,9 @@ QString RunMonitor::update(const RunSelection &selection)
             if (selectedRunKey != m_activeSelectionKey) {
                 m_activeSelectionKey = selectedRunKey;
                 m_levelVerifiedThisRun = false;
-                m_finishArmed = false;
                 m_finishHandled = false;
                 m_finishMessage.clear();
-                m_previousLevelCount = -1.0f;
+                m_noLoadRtaTimer.reset();
             }
 
             const QString selectedLevelCode =
@@ -113,35 +110,48 @@ QString RunMonitor::update(const RunSelection &selection)
                 && m_previousGameTime > 0.0f
                 && process->gameTime + 0.001f < m_previousGameTime;
 
-            // A death or checkpoint reload can place Lara on the other side of
-            // a signal face. End the armed attempt before that movement is ever
-            // considered a completion.
+            // A death or checkpoint reload begins a new level attempt. Clear
+            // the verified run state before a later result screen can be read.
             if (gameTimeRewound) {
                 m_levelVerifiedThisRun = false;
-                m_finishArmed = false;
                 m_finishHandled = false;
                 m_finishMessage.clear();
-                m_previousLevelCount = -1.0f;
+                // Level runs restart on a death/checkpoint reload. Full-game
+                // rules will keep this timer alive across level transitions.
+                m_noLoadRtaTimer.reset();
                 // Keep the restart state visible long enough for the opponent
                 // heartbeat to report it at least once.
                 m_restartPresencePolls = 50;
             }
 
-            const bool levelCountAdvanced =
-                process->levelCountAvailable
-                && std::isfinite(process->levelCount)
-                && m_previousLevelCount >= 0.0f
-                && process->levelCount > m_previousLevelCount + 0.001f;
-
-            const bool endscreenVisible =
-                process->menuStateAvailable && process->menuState >= 1;
+            // The level code pair is the first external frame on which Lara is
+            // confirmed inside the selected level. The clock starts at zero on
+            // that observation and advances from a monotonic local clock.
+            if (!m_finishHandled) {
+                m_noLoadRtaTimer.observe(
+                    expectedLevelIsActive,
+                    process->loadingAvailable,
+                    process->loading
+                    );
+            }
+            const qint64 rtaNoLoadMilliseconds = m_noLoadRtaTimer.valid()
+                && m_noLoadRtaTimer.started()
+                ? m_noLoadRtaTimer.elapsedMilliseconds()
+                : -1;
+            const float rtaNoLoadSeconds = rtaNoLoadMilliseconds >= 0
+                ? static_cast<float>(rtaNoLoadMilliseconds) / 1000.0f
+                : -1.0f;
+            const QString rtaNoLoadStatus = !m_noLoadRtaTimer.valid()
+                ? QStringLiteral("unavailable")
+                : rtaNoLoadSeconds >= 0.0f
+                ? formatRtaNoLoads(rtaNoLoadMilliseconds)
+                : QStringLiteral("--:--");
 
             QString runStatus;
 
             if (!process->gameTimeAvailable) {
                 runStatus = QStringLiteral("IGT unavailable");
                 m_previousGameTime = -1.0f;
-                m_previousLevelCount = -1.0f;
                 m_unchangedPolls = 0;
             } else if (process->gameTime <= 0.0f) {
                 runStatus = QStringLiteral("Waiting for level");
@@ -166,69 +176,21 @@ QString RunMonitor::update(const RunSelection &selection)
             // TRAE-Menu-Hook.asi blocks attempt confirmation.
             const bool integrityPassed = process->blockedModule.isEmpty();
 
-            const QString endTriggerCode =
-                expectedEndTriggerCode(selection.levelIndex);
-
-            const bool onEndPortal =
-                !endTriggerCode.isEmpty()
-                && process->currentPositionAvailable
-                && process->currentPositionCode.compare(
-                       endTriggerCode,
-                       Qt::CaseInsensitive
-                       ) == 0;
-
-            const bool onEndSignal =
-                process->signalCrossingAvailable
-                && isExpectedEndSignal(
-                       selection.levelIndex,
-                       process->crossedSignalId
-                       );
-
-            // TRA commits its level counter on the result screen. Unlike a
-            // portal, this catches cutscene and QTE endings without guessing
-            // their intermediate position codes.
-            const bool onEndscreenCompletion =
-                levelCountAdvanced && endscreenVisible;
-
-            const bool onEndTrigger =
-                onEndPortal || onEndSignal || onEndscreenCompletion;
-
-            // Signal IDs are reused by unrelated trigger meshes. They may
-            // assist diagnostics, but never authorise a finish. The optional
-            // screen verifier independently identifies the actual result
-            // screen and writes one matching completion event.
+            // The verifier recognises TRA's actual result screen, including
+            // cutscene and QTE exits. This is deliberately level-agnostic:
+            // portals and signals repeat between levels and are diagnostics,
+            // never authority to save a completion.
             const bool screenCompletionConfirmed =
                 m_screenCompletionReader.takeCompletionFor(selection.level);
 
-            // Loading a save can also move game state forward. Never carry an
-            // armed attempt across that transition; it must be observed again
-            // from stable in-level state.
-            if (m_finishArmed && process->loadingAvailable && process->loading) {
-                m_finishArmed = false;
-                m_finishMessage = QStringLiteral("Run invalidated: loading observed");
-            }
-
-            // Arm after a valid run starts away from its completion portal.
-            // This prevents stale portal data from recording a duplicate attempt.
             if (!m_finishHandled
-                && m_levelVerifiedThisRun
-                && expectedLevelIsActive
-                && process->gameTimeAvailable
-                && process->gameTime > 0.0f
-                && !gameTimeRewound
-                && (!process->loadingAvailable || !process->loading)
-                && !onEndTrigger) {
-                m_finishArmed = true;
-                m_finishMessage.clear();
-            }
-
-            if (!m_finishHandled
-                && m_finishArmed
                 && screenCompletionConfirmed
+                && m_levelVerifiedThisRun
+                && m_noLoadRtaTimer.started()
+                && m_noLoadRtaTimer.valid()
                 && process->gameTimeAvailable
                 && process->gameTime > 0.0f
-                && !gameTimeRewound
-                && (!process->loadingAvailable || !process->loading)) {
+                && !gameTimeRewound) {
                 if (!integrityPassed) {
                     m_finishMessage = QStringLiteral("Finish rejected: ")
                         + process->blockedModule;
@@ -240,6 +202,7 @@ QString RunMonitor::update(const RunSelection &selection)
                             selection.category,
                             selection.subcategory,
                             process->gameTime,
+                            rtaNoLoadSeconds,
                             process->buildHash,
                             &saveError)) {
                         m_savedAttempt = AttemptRecord{
@@ -247,36 +210,34 @@ QString RunMonitor::update(const RunSelection &selection)
                             selection.category,
                             selection.subcategory,
                             process->gameTime,
+                            rtaNoLoadSeconds,
                             process->buildHash
                         };
-                        m_finishMessage = QStringLiteral("Finish saved: ")
-                            + formatIgt(process->gameTime);
+                        m_finishMessage = QStringLiteral("Finish saved: RTA ")
+                            + rtaNoLoadStatus;
                     } else {
                         m_finishMessage = QStringLiteral("Finish not saved: ")
                             + saveError;
                     }
                 }
 
-                // Consume this completion even when integrity fails: a persistent
-                // portal code must never be accepted after a Menu Hook is removed.
-                m_finishArmed = false;
+                // Consume this completion even when integrity fails: a result
+                // screen must never be accepted after a blocked module is removed.
                 m_finishHandled = true;
             }
-            m_previousLevelCount =
-                process->levelCountAvailable && std::isfinite(process->levelCount)
-                    ? process->levelCount
-                    : -1.0f;
-
             if (m_finishHandled) {
-                m_presence = RunPresence{QStringLiteral("finished"), process->gameTime};
+                m_presence = RunPresence{
+                    QStringLiteral("finished"), process->gameTime, rtaNoLoadSeconds};
             } else if (m_restartPresencePolls > 0) {
                 --m_restartPresencePolls;
-                m_presence = RunPresence{QStringLiteral("restarted"), process->gameTime};
-            } else if (m_levelVerifiedThisRun && process->gameTimeAvailable
-                       && process->gameTime > 0.0f) {
-                m_presence = RunPresence{QStringLiteral("running"), process->gameTime};
+                m_presence = RunPresence{
+                    QStringLiteral("restarted"), process->gameTime, rtaNoLoadSeconds};
+            } else if (m_levelVerifiedThisRun && m_noLoadRtaTimer.started()) {
+                m_presence = RunPresence{
+                    QStringLiteral("running"), process->gameTime, rtaNoLoadSeconds};
             } else {
-                m_presence = RunPresence{QStringLiteral("waiting"), process->gameTime};
+                m_presence = RunPresence{
+                    QStringLiteral("waiting"), process->gameTime, rtaNoLoadSeconds};
             }
 
             const QString integrityStatus =
@@ -287,8 +248,11 @@ QString RunMonitor::update(const RunSelection &selection)
 
             if (m_presence.state == QStringLiteral("running")
                 || m_presence.state == QStringLiteral("restarted")) {
-                return QStringLiteral("IGT\n%1\n\n%2")
+                return QStringLiteral("RTA (no loads)\n%1%2\n\nIGT\n%3\n\n%4")
                     .arg(
+                        rtaNoLoadStatus,
+                        m_noLoadRtaTimer.pausedForLoad()
+                            ? QStringLiteral("  (loading)") : QString(),
                         gameTimeStatus,
                         integrityStatus
                         );
@@ -307,13 +271,16 @@ QString RunMonitor::update(const RunSelection &selection)
 
             return QStringLiteral(
                     "Selected speedrun:\n%1\n%2\n%3"
-                    "\n\n%4\n\nIGT\n%5\n\n%6"
+                    "\n\n%4\n\nRTA (no loads)\n%5%6\n\nIGT\n%7\n\n%8"
                     )
                     .arg(
                         selection.level,
                         rulesetName(selection.category, selection.subcategory),
                         levelVerificationStatus,
                         activityStatus,
+                        rtaNoLoadStatus,
+                        m_noLoadRtaTimer.pausedForLoad()
+                            ? QStringLiteral("  (loading)") : QString(),
                         gameTimeStatus,
                         integrityStatus
                         );
