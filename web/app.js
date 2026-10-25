@@ -2,6 +2,8 @@ const config = {
   apiBase: window.TRSR_API_URL || "https://api.trsr.app",
 };
 
+const githubReleaseApi = "https://api.github.com/repos/amedrii/TRSR/releases/latest";
+
 const leaderboardFilters = {
   game: document.getElementById("game-filter"),
   level: document.getElementById("level-filter"),
@@ -13,6 +15,37 @@ let leaderboardRequest = 0;
 
 function endpoint(path) {
   return `${config.apiBase.replace(/\/$/, "")}${path}`;
+}
+
+async function loadLatestReleaseDownload() {
+  const links = [...document.querySelectorAll("[data-release-download]")];
+  if (!links.length) return;
+
+  links.forEach((link) => link.addEventListener("click", (event) => {
+    if (link.getAttribute("aria-disabled") === "true") event.preventDefault();
+  }));
+
+  try {
+    const response = await fetch(githubReleaseApi, {
+      headers: { Accept: "application/vnd.github+json" },
+    });
+    if (!response.ok) throw new Error(`GitHub release request failed (${response.status})`);
+    const release = await response.json();
+    const asset = (release.assets || []).find((item) => /^TRSR-[0-9][^/]*\.zip$/i.test(item.name));
+    if (!asset?.browser_download_url) throw new Error("Latest release has no TRSR ZIP asset");
+
+    links.forEach((link) => {
+      link.href = asset.browser_download_url;
+      link.target = "_blank";
+      link.rel = "noreferrer";
+      link.removeAttribute("aria-disabled");
+    });
+    document.getElementById("download-link").innerHTML = `Download ${escapeHtml(asset.name)} <span>↓</span>`;
+  } catch {
+    const downloadLink = document.getElementById("download-link");
+    downloadLink.textContent = "Latest release is unavailable";
+    downloadLink.title = "Publish a GitHub release with a TRSR-x.x.x.zip asset, then reload this page.";
+  }
 }
 
 async function fetchJson(path, options = {}) {
@@ -252,6 +285,7 @@ function setupAccountDialog() {
 
 setupNavigation();
 setupAccountDialog();
+loadLatestReleaseDownload();
 for (const element of Object.values(leaderboardFilters)) {
   element.addEventListener("change", loadLeaderboard);
 }
