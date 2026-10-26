@@ -30,6 +30,7 @@
 #include <QPainterPath>
 #include <QPushButton>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QPixmap>
 #include <QSettings>
 #include <QStringList>
@@ -44,38 +45,11 @@
 
 #include <algorithm>
 #include <cmath>
-#include <initializer_list>
-#include <thread>
-#include <utility>
-
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-
-enum class ClientNotification
-{
-    MatchFound,
-    Victory,
-    Defeat
-};
-
-static void playClientNotification(ClientNotification notification)
-{
-    // Original short "bronze chime" patterns. They do not reuse TRA audio.
-    std::thread([notification]() {
-        const std::initializer_list<std::pair<DWORD, DWORD>> tones =
-            notification == ClientNotification::MatchFound
-                ? std::initializer_list<std::pair<DWORD, DWORD>>{{392, 80}, {523, 80}, {659, 140}}
-                : notification == ClientNotification::Victory
-                    ? std::initializer_list<std::pair<DWORD, DWORD>>{{523, 80}, {659, 80}, {784, 80}, {1047, 180}}
-                    : std::initializer_list<std::pair<DWORD, DWORD>>{{494, 120}, {392, 120}, {294, 180}};
-        for (const auto &[frequency, duration] : tones) {
-            Beep(frequency, duration);
-        }
-    }).detach();
-}
 
 static void bringMatchWindowToFront(QMainWindow &window)
 {
@@ -832,11 +806,20 @@ int runTrasrApplication(QApplication &app)
         }
         if (QFileInfo::exists(tesseractPath)) {
             arguments << QStringLiteral("--tesseract") << tesseractPath;
+
+            // The portable release carries its own trained-data files.  Set
+            // this explicitly so the helper is independent of the caller's
+            // working directory and any system Tesseract installation.
+            QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+            environment.insert(
+                QStringLiteral("TESSDATA_PREFIX"),
+                appDirectory.filePath(QStringLiteral("tools/tesseract")));
+            screenDetector->setProcessEnvironment(environment);
         }
 
         screenDetector->start(program, arguments);
         screenVerifierStatus->setText(
-            QStringLiteral("Screen verifier: watching %1").arg(level)
+            QStringLiteral("Screen verifier: starting")
             );
     };
 
@@ -856,15 +839,29 @@ int runTrasrApplication(QApplication &app)
 
     QObject::connect(
         screenDetector,
+        &QProcess::started,
+        &window,
+        [screenDetector, screenVerifierStatus]() {
+            screenVerifierStatus->setText(
+                QStringLiteral("Screen verifier: watching %1").arg(
+                    screenDetector->property("selectedLevel").toString())
+                );
+        }
+        );
+
+    QObject::connect(
+        screenDetector,
         qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
         &window,
         [screenDetector, screenVerifierStatus, launchScreenDetector](
-            int, QProcess::ExitStatus
+            int exitCode, QProcess::ExitStatus
             ) {
             if (!screenDetector->property("restartWhenStopped").toBool()) {
-                screenVerifierStatus->setText(
-                    QStringLiteral("Screen verifier: stopped")
-                    );
+                const QString output = QString::fromUtf8(
+                    screenDetector->readAllStandardOutput()).simplified();
+                screenVerifierStatus->setText(output.isEmpty()
+                    ? QStringLiteral("Screen verifier: stopped (exit %1)").arg(exitCode)
+                    : QStringLiteral("Screen verifier: stopped — %1").arg(output.left(180)));
                 return;
             }
 
@@ -877,9 +874,10 @@ int runTrasrApplication(QApplication &app)
         screenDetector,
         &QProcess::errorOccurred,
         &window,
-        [screenVerifierStatus](QProcess::ProcessError) {
+        [screenDetector, screenVerifierStatus](QProcess::ProcessError) {
             screenVerifierStatus->setText(
-                QStringLiteral("Screen verifier: unavailable")
+                QStringLiteral("Screen verifier: unavailable — %1").arg(
+                    screenDetector->errorString())
                 );
         }
         );
@@ -1590,8 +1588,6 @@ int runTrasrApplication(QApplication &app)
                         forfeitButton->setEnabled(false);
                         setQueueUiState(true, false, true);
                         const bool won = winnerPlayerId == playerId;
-                        playClientNotification(won ? ClientNotification::Victory
-                                                   : ClientNotification::Defeat);
                         bringMatchWindowToFront(window);
                         opponentStatus->setText(
                             won ? QStringLiteral("Result: You win")
@@ -1761,7 +1757,6 @@ int runTrasrApplication(QApplication &app)
                         declineMatchButton->setEnabled(!youAccepted);
                         if (!*proposalNotified) {
                             *proposalNotified = true;
-                            playClientNotification(ClientNotification::MatchFound);
                             bringMatchWindowToFront(window);
                         }
                         const QDateTime expiresAt = QDateTime::fromString(

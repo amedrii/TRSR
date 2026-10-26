@@ -1,5 +1,5 @@
 const LEVELS = ["Mountain Caves", "City of Vilcabamba", "The Lost Valley", "Tomb of Qualopec", "St. Francis Folly", "The Coliseum", "Midas Palace", "Tomb of Tihocan", "Temple of Khamoon", "Obelisk of Khamoon", "Sanctuary of the Scion", "Natla's Mines", "The Great Pyramid", "Final Conflict", "Croft Manor"];
-const CATEGORIES = ["Any%", "100%"];
+const CATEGORIES = ["Any%"];
 const SUBCATEGORIES = ["No Bug Jump", "Bug Jump", "Better Than Glitchless", "Glitchless"];
 const headers = { "Access-Control-Allow-Origin": "https://trsr.app", "Access-Control-Allow-Credentials": "true", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type", "Content-Type": "application/json" };
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers });

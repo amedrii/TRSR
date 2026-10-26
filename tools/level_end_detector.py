@@ -131,8 +131,10 @@ def is_completion_screen(text: str, expected_level: str) -> bool:
     folded = normalized(text)
     has_completion = any(normalized(phrase) in folded for phrase in COMPLETION_PHRASES)
     has_continue = normalized(CONTINUE_PHRASE) in folded
-    has_level = normalized(expected_level) in folded
-    return has_completion and has_continue and has_level
+    # The client has already verified the selected level from game memory.
+    # Requiring OCR to reproduce a level name as well made valid result screens
+    # fail on different resolutions, languages' punctuation, and title layouts.
+    return has_completion and has_continue
 
 
 def emit_event(event: CompletionEvent, event_file: Optional[Path], webhook: Optional[str]) -> None:
@@ -183,6 +185,13 @@ def main() -> int:
         raise SystemExit("--poll-seconds must be positive and --confirmations must be at least 2.")
     if args.tesseract:
         pytesseract.pytesseract.tesseract_cmd = str(args.tesseract)
+
+    # A launched verifier always creates its event file, even before it sees a
+    # completion. This distinguishes a running verifier with no match from a
+    # helper that failed to launch in a portable installation.
+    if args.event_file:
+        args.event_file.parent.mkdir(parents=True, exist_ok=True)
+        args.event_file.touch(exist_ok=True)
 
     confirmed = 0
     completed_this_screen = False
